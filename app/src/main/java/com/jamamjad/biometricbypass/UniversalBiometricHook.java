@@ -45,6 +45,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *      this process to talk to system BiometricService; the last net before
  *      the system server sees the request.
  *
+ * v1.1.4 - PromptInfo-aware rewrite. On modern AOSP the object that actually
+ * crosses the binder into BiometricService is `android.hardware.biometrics.
+ * PromptInfo` (the framework base class - BiometricPrompt$Params extends it),
+ * and the authenticator mask lives on it. The rewrite layer now recognises
+ * PromptInfo (and its subclasses) and uses the public setAllowedAuthenticators()
+ * first, field write second, so the service-level call is rewritten whether it
+ * is a BiometricPrompt$Params or a raw PromptInfo. DEVICE_CREDENTIAL is OR-ed
+ * into the existing mask (keeps keystore-bound requests valid) rather than
+ * replacing it.
+ *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
  *
@@ -194,10 +204,32 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         if (o == null) {
             return false;
         }
-        String n = o.getClass().getName();
-        return n.equals("android.hardware.biometrics.BiometricPrompt$Params")
+        Class<?> c = o.getClass();
+        String n = c.getName();
+        // The authenticator mask ultimately lives inside PromptInfo (or a
+        // subclass of it). On API 28+ the app-level carrier is
+        // BiometricPrompt$Params (= AuthenticationParams), while the object
+        // that reaches IBiometricService.authenticate() is a PromptInfo (the
+        // framework base class) or a Params subclass. We rewrite either.
+        if (n.equals("android.hardware.biometrics.PromptInfo")
+                || n.startsWith("android.hardware.biometrics.PromptInfo$")) {
+            return true;
+        }
+        if (n.equals("android.hardware.biometrics.BiometricPrompt$Params")
                 || n.equals("android.hardware.biometrics.BiometricPrompt$AuthenticationParams")
-                || n.startsWith("android.hardware.biometrics.BiometricPrompt$");
+                || n.startsWith("android.hardware.biometrics.BiometricPrompt$")) {
+            return true;
+        }
+        // Subclasses of PromptInfo from the open-source framework / vendors.
+        while (c != null) {
+            Class<?> sup = c.getSuperclass();
+            if (sup != null
+                    && sup.getName().equals("android.hardware.biometrics.PromptInfo")) {
+                return true;
+            }
+            c = sup;
+        }
+        return false;
     }
 
     private static int getAllowedAuthenticators(Object params) {
@@ -245,7 +277,12 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         if ((current & AUTHENTICATOR_DEVICE_CREDENTIAL) != 0) {
             return params;
         }
-        if (overwriteAllowedAuthenticators(params, AUTHENTICATOR_DEVICE_CREDENTIAL)) {
+        // OR in DEVICE_CREDENTIAL while KEEPING the original biometric bits.
+        // BiometricService sees "no biometric enrolled, credential allowed" and
+        // automatically falls back to the device PIN screen. Preserving the
+        // original mask also keeps keystore-bound cryptographic requests valid.
+        if (overwriteAllowedAuthenticators(params,
+                current | AUTHENTICATOR_DEVICE_CREDENTIAL)) {
             return params;
         }
         Object rebuilt = rebuildAuthenticationParams(params);
@@ -253,6 +290,16 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
     }
 
     private static boolean overwriteAllowedAuthenticators(Object params, int value) {
+        // Preferred path: the public setter (present on PromptInfo and on
+        // BiometricPrompt$Params on modern SDKs). It updates the backing field
+        // and keeps the object fully usable for marshalling across the binder.
+        try {
+            Method setter = params.getClass().getMethod("setAllowedAuthenticators", int.class);
+            setter.invoke(params, value);
+            return getAllowedAuthenticators(params) == value;
+        } catch (Throwable ignored) {
+            // fall through to the field rewrite below
+        }
         try {
             Class<?> c = params.getClass();
             Field f = null;
@@ -308,7 +355,10 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 }
                 c.setAccessible(true);
                 Object[] args = new Object[types.length];
-                args[0] = AUTHENTICATOR_DEVICE_CREDENTIAL;
+                int originalAuths = getAllowedAuthenticators(original);
+                args[0] = (originalAuths >= 0)
+                        ? (originalAuths | AUTHENTICATOR_DEVICE_CREDENTIAL)
+                        : AUTHENTICATOR_DEVICE_CREDENTIAL;
                 boolean confirm = readBoolMethod(original, "isConfirmCredentialRequired");
                 boolean promptEnabled = readBoolMethod(original, "isBiometricPromptEnabled");
                 boolean ignoreEnrollment = readBoolMethod(original, "isIgnoreEnrollmentState");
