@@ -164,7 +164,7 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                                 param.method.getName(),
                                 param.args,
                                 "AUTHENTICATORS->DEVICE_CREDENTIAL(0x8000)");
-                        param.setArg(i, forced);
+                        param.args[i] = forced;
                     }
                 }
             }
