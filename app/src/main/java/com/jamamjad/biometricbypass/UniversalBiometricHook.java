@@ -126,6 +126,26 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *       credential-allowed prompt and unblocks the later "decrypt" (login)
  *       branch which is itself gated on ResourceMapper.l().
  *
+ * v2.0.0 - PER-APP SCOPE & FEATURE CONFIG (replaces universal * scope):
+ *   User-selectable apps only. The in-app UI (MainActivity) writes a JSON
+ *   config to /data/local/tmp/biobypass_config.json (root, world-readable)
+ *   listing EACH selected app and its enabled features:
+ *       { biometric, devOptions, usbDebug }
+ *   handleLoadPackage() now reads Config.forPackage(packageName) in every
+ *   process and:
+ *     - biometric  -> installs the full PIN-fallback / prompt-rewrite stack
+ *                     (AndroidX + framework + signature + OFSS Digix).
+ *     - devOptions -> spoof development_settings_enabled read -> 0 (apps that
+ *                     detect "Developer options" being ON).
+ *     - usbDebug   -> spoof adb_enabled / adb_wifi_enabled reads -> 0 and
+ *                     Debug.isTracing()/isDebuggerConnected() -> false (apps
+ *                     that detect USB debugging specifically).
+ *   Apps NOT in the config receive NO hooks at all (module inert). This model
+ *   mirrors the HMA per-app idea (see HMA_Config in the project folder) but
+ *   with our own JSON+flags implementation: you add YOUR banks/apps, not all.
+ *   LSPosed scope is likewise written by the UI (su + lspd cli scope set) to
+ *   ONLY the selected packages (+ optional "system"); universal * is removed.
+ *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
  *
@@ -207,23 +227,37 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
-    // --- v1.1.6 DEV-OPTION / ADB SPOOF (universal) --------------------------
-    // Banks (Meezan, Upaisa, Faysal) refuse to run while Developer Options or
-    // USB debugging are ON. We spoof the settings reads back as "off" inside
-    // every app process (system_server is skipped, so real system state is
-    // untouched and ADB stays alive on the PC side).
+    // --- v2.0 DEV-OPTION / USB-DEBUG SPOOF (per-app, gated by config) --------
+    // Banks decide to run or refuse based on these Setting reads. v2.0 splits
+    // them into two independent feature flags per app (Config.devOptions vs
+    // Config.usbDebug). Only the KEY the app actually probes gets spoofed, and
+    // only for apps the user selected in the UI.
     private static final String KEY_DEVELOPMENT_SETTINGS_ENABLED = "development_settings_enabled";
     private static final String KEY_ADB_ENABLED = "adb_enabled";
     private static final String KEY_ADB_WIFI_ENABLED = "adb_wifi_enabled";
 
-    private static boolean isDeveloperOptionKey(Object[] args) {
+    // Per-process flags set from Config in handleLoadPackage().
+    private static volatile boolean cfgBiometric;
+    private static volatile boolean cfgDevOptions;
+    private static volatile boolean cfgUsbDebug;
+
+    // 1 == developer-options key, 2 == usb-debug key, 0 == unrelated.
+    private static int devOptionKeyType(Object[] args) {
         if (args == null || args.length < 2 || !(args[1] instanceof String)) {
-            return false;
+            return 0;
         }
         String key = (String) args[1];
-        return KEY_DEVELOPMENT_SETTINGS_ENABLED.equals(key)
-                || KEY_ADB_ENABLED.equals(key)
-                || KEY_ADB_WIFI_ENABLED.equals(key);
+        if (KEY_DEVELOPMENT_SETTINGS_ENABLED.equals(key)) {
+            return 1;
+        }
+        if (KEY_ADB_ENABLED.equals(key) || KEY_ADB_WIFI_ENABLED.equals(key)) {
+            return 2;
+        }
+        return 0;
+    }
+
+    private static boolean devOptionKeyAllowed(int type) {
+        return (type == 1 && cfgDevOptions) || (type == 2 && cfgUsbDebug);
     }
 
     // Settings.Global/Secure/System.getInt(ContentResolver, String, int) and
@@ -231,7 +265,8 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
     private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (isDeveloperOptionKey(param.args)) {
+            int type = devOptionKeyType(param.args);
+            if (type != 0 && devOptionKeyAllowed(type)) {
                 DiagnosticLogger.callSpoofed(
                         param.method.getDeclaringClass().getName(),
                         param.method.getName(),
@@ -246,7 +281,8 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
     private static final XC_MethodHook RETURN_DEV_OPTIONS_NULL = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (isDeveloperOptionKey(param.args)) {
+            int type = devOptionKeyType(param.args);
+            if (type != 0 && devOptionKeyAllowed(type)) {
                 DiagnosticLogger.callSpoofed(
                         param.method.getDeclaringClass().getName(),
                         param.method.getName(),
@@ -257,16 +293,18 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
-    // Debug.isTracing() / isDebuggerConnected() -> false (some banks probe it).
+    // Debug.isTracing() / isDebuggerConnected() -> false (usb-debug feature).
     private static final XC_MethodHook RETURN_NOT_TRACING = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            DiagnosticLogger.callSpoofed(
-                    param.method.getDeclaringClass().getName(),
-                    param.method.getName(),
-                    param.args,
-                    "false");
-            param.setResult(false);
+            if (cfgUsbDebug) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args,
+                        "false");
+                param.setResult(false);
+            }
         }
     };
 
@@ -756,11 +794,10 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
-        // v1.1.6: CRITICAL - do not inject into system_server. The scope is now
-        // universal ("*"), and without this skip the dev-option/ADB spoofs would
-        // run inside system services where the system itself reads adb_enabled /
-        // development_settings_enabled. Skipping "android" keeps ADB and system
-        // services fully functional (the previous ADB breakage vector).
+        // v2.0: NOTHING is injected into system_server under any condition -
+        // the previous universal ADB breakage vector. The UI may still add
+        // "system" to the LSPosed scope list, but this guard keeps ADB and
+        // system services fully functional.
         if ("android".equals(lpparam.packageName)) {
             DiagnosticLogger.setProcessContext(lpparam.packageName, lpparam.processName);
             DiagnosticLogger.log("Skipping system_server (prevents ADB breakage)");
@@ -771,28 +808,41 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
             return;
         }
 
+        // v2.0: per-app feature configuration. Apps NOT listed in the config
+        // get zero hooks ("I add MY apps, not ALL apps").
+        Config.AppConfig app = Config.forPackage(lpparam.packageName);
+        cfgBiometric = app.biometric;
+        cfgDevOptions = app.devOptions;
+        cfgUsbDebug = app.usbDebug;
+
         // Diagnostic context + runtime switch (Phase 12 support).
         DiagnosticLogger.setProcessContext(lpparam.packageName, lpparam.processName);
         DiagnosticLogger.applyRuntimeSwitch();
         DiagnosticLogger.log("LOADED package=" + lpparam.packageName
                 + " process=" + lpparam.processName
                 + " isFirstApplication=" + lpparam.isFirstApplication
-                + " sdk=" + Build.VERSION.SDK_INT);
+                + " sdk=" + Build.VERSION.SDK_INT
+                + " cfg={bio=" + cfgBiometric + ",dev=" + cfgDevOptions
+                + ",usb=" + cfgUsbDebug + "}");
 
-        hookFingerprintManager(lpparam.classLoader);
-        hookBiometricManager(lpparam.classLoader);
-        hookAndroidXBiometrics(lpparam.classLoader);
-        // v1.1.7: obfuscation-proof AndroidX hooks (R8-renamed androidx.biometric
-        // in bank apps like Meezan), matched by signature not by method name.
-        hookAndroidxBySignature(lpparam.classLoader);
-        hookObserversOnly(lpparam.classLoader);
-        hookDeviceCredentialFallback(lpparam.classLoader);
-        // v1.1.6: universal dev-option/ADB spoof for EVERY app process (bank
-        // apps check these settings and refuse to run with dev options on).
-        hookDeveloperOptionsSpoof(lpparam.classLoader);
-        // v1.1.8: OFSS Digix (Meezan Bank family) enable-fingerprint fix -
-        // keystore keygen without an enrolled biometric + ResourceMapper bools.
-        hookOfssDigix(lpparam.classLoader, lpparam.packageName);
+        if (cfgBiometric) {
+            hookFingerprintManager(lpparam.classLoader);
+            hookBiometricManager(lpparam.classLoader);
+            hookAndroidXBiometrics(lpparam.classLoader);
+            // v1.1.7: obfuscation-proof AndroidX hooks (R8-renamed androidx.biometric
+            // in bank apps like Meezan), matched by signature not by method name.
+            hookAndroidxBySignature(lpparam.classLoader);
+            hookObserversOnly(lpparam.classLoader);
+            hookDeviceCredentialFallback(lpparam.classLoader);
+            // v1.1.8: OFSS Digix (Meezan Bank family) enable-fingerprint fix -
+            // keystore keygen without an enrolled biometric + ResourceMapper bools.
+            hookOfssDigix(lpparam.classLoader, lpparam.packageName);
+        }
+        if (cfgDevOptions || cfgUsbDebug) {
+            // v2.0: dev-option / usb-debug spoof; internal key filter decides
+            // which keys may be spoofed for THIS app based on the config.
+            hookDeveloperOptionsSpoof(lpparam.classLoader);
+        }
 
         // Install summary, per process, for the diagnostic report.
         DiagnosticLogger.log("INSTALL_SUMMARY installed=" + hooksInstalled

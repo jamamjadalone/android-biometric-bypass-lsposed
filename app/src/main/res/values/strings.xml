@@ -4,7 +4,17 @@
     <string name="module_status_title">Module Status</string>
     <string name="module_active">LSPosed Framework Linked</string>
     <string name="module_description">Provides fallback hardware state redirection for devices with missing, uncalibrated, or faulty biometric modules under custom ROMs (LineageOS/AOSP).</string>
-    <string name="scope_title">Active Scope: android (System Server)</string>
+    <string name="scope_title">Active Scope: user-selected apps only</string>
     <string name="privacy_note_title">System &amp; Privacy Notice</string>
     <string name="privacy_note_desc">This module operates locally at runtime. It performs state redirection only and does NOT collect, store, or transmit biometric templates, credentials, or private device data.</string>
+
+    <!-- v2.0 per-app UI -->
+    <string name="v2_subtitle">v2.0 — per-app control (add YOUR apps, not all)</string>
+    <string name="search_hint">Search apps…</string>
+    <string name="system_scope_toggle">Also add system scope (inert; dev/USB spoof stays app-only)</string>
+    <string name="apply_btn">Apply (save + set scope)</string>
+    <string name="toggle_bio">Bio</string>
+    <string name="toggle_dev">Dev Optn</string>
+    <string name="toggle_usb">USB DBG</string>
+    <string name="ic_desc">app icon</string>
 </resources>
