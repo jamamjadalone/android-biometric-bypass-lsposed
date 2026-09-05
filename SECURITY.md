@@ -18,8 +18,8 @@ The security of our users and their devices is of paramount importance. If you d
 ### Guidelines for Responsible Disclosure:
 - **Do NOT** open a public issue, discussion thread, or pull request disclosing the vulnerability.
 - Please use GitHub's private vulnerability reporting feature directly on the repository via the **Security** tab -> **Report a vulnerability**.
-- Alternatively, you can email the maintainer privately with full technical details, proof-of-concept steps, and environment specifics:
-  - **Email**: `security@jamamjad.com` *(or via direct GitHub advisory)*
+- For direct contact, updates, questions, or community discussions, reach out via the official channel:
+  - **YouTube / Community**: [youtube.com/@jamamjadalone](https://www.youtube.com/@jamamjadalone)
 
 ### What to Include in Your Report:
 1. Exact device architecture, Android version, and custom ROM details (e.g., LineageOS 22, crDroid, AOSP).

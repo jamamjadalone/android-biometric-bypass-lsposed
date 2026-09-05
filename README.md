@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge&logo=apache)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--36)-3DDC84.svg?style=for-the-badge&logo=android)](https://developer.android.com)
 [![Framework](https://img.shields.io/badge/Framework-LSPosed%20%2F%20API%2093%2B-8B5CF6.svg?style=for-the-badge&logo=android)](https://github.com/LSPosed/LSPosed)
-[![Language](https://img.shields.io/badge/Language-Java%2017-E76F51.svg?style=for-the-badge&logo=openjdk)](https://www.oracle.com/java/)
+[![YouTube](https://img.shields.io/badge/YouTube-@jamamjadalone-FF0000.svg?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@jamamjadalone)
 
 <p align="center">
   <b>High-performance, non-blocking biometric framework interceptor for custom ROMs, GSI builds, and AOSP devices.</b>
@@ -95,6 +95,13 @@ app/build/outputs/apk/debug/app-debug.apk
 > **Privacy Notice**: This module performs local, non-persistent method return adjustments inside your device's memory. It **does NOT** store, record, capture, or transmit user credentials, biometric templates, passwords, PINs, or device identifiers. All operations strictly execute on-device within isolated process sandboxes.
 
 For reporting security vulnerabilities, please refer to our [Security Policy](SECURITY.md).
+
+---
+
+## 💬 Community & Contact
+
+For questions, tutorials, and project updates, connect with us on YouTube:
+- 📺 **Channel**: [@jamamjadalone](https://www.youtube.com/@jamamjadalone)
 
 ---
 
