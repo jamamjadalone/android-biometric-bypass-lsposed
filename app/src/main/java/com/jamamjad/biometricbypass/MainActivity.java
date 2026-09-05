@@ -241,6 +241,7 @@ public class MainActivity extends AppCompatActivity {
                 f = new boolean[]{false, false, false};
                 state.put(e.pkg, f);
             }
+            final boolean[] flags = f;
 
             ImageView ivIcon = convertView.findViewById(R.id.iv_icon);
             TextView tvName = convertView.findViewById(R.id.tv_app_name);
@@ -255,13 +256,13 @@ public class MainActivity extends AppCompatActivity {
             tvName.setText(e.label);
             tvPkg.setText(e.pkg);
 
-            swBio.setChecked(f[BIO]);
-            swDev.setChecked(f[DEV]);
-            swUsb.setChecked(f[USB]);
+            swBio.setChecked(flags[BIO]);
+            swDev.setChecked(flags[DEV]);
+            swUsb.setChecked(flags[USB]);
 
-            swBio.setOnCheckedChangeListener((v, is) -> f[BIO] = is);
-            swDev.setOnCheckedChangeListener((v, is) -> f[DEV] = is);
-            swUsb.setOnCheckedChangeListener((v, is) -> f[USB] = is);
+            swBio.setOnCheckedChangeListener((v, is) -> flags[BIO] = is);
+            swDev.setOnCheckedChangeListener((v, is) -> flags[DEV] = is);
+            swUsb.setOnCheckedChangeListener((v, is) -> flags[USB] = is);
 
             return convertView;
         }
