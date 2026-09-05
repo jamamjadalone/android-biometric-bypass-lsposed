@@ -55,6 +55,22 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  * into the existing mask (keeps keystore-bound requests valid) rather than
  * replacing it.
  *
+ * v1.1.5 - UNIVERSAL bank-app hardening (per understand-itttt plan):
+ *   - Hook BiometricManager.getEnrolledBiometrics() to return a synthetic
+ *     non-empty list (API 30+ apps gate fingerprint setup on it; empty == NOT
+ *     ENROLLED and was blocking the "Enable Fingerprint" toggle).
+ *   - Hook FingerprintManager.getEnrolledFingerprints() no-arg return as well.
+ *   - Force the REAL builder classes to build a credential-allowed prompt:
+ *       framework  BiometricPrompt$Builder / PromptInfo$Builder / Params$Builder
+ *       AndroidX   BiometricPrompt$PromptInfo$Builder / BiometricPrompt$Builder
+ *     by forcing setDeviceCredentialAllowed(true),
+ *     setConfirmationRequired(false), and OR-ing 0x8000 into
+ *     setAllowedAuthenticators(...) - so the prompt shows the PIN screen and
+ *     the app's own onAuthenticationSucceeded fires with a REAL credential
+ *     token (no forged crypto).
+ *   - Retains the IBiometricService$Stub$Proxy.authenticate PromptInfo rewrite
+ *     as the final in-process net before the binder.
+ *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
  *
@@ -122,21 +138,94 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
-    private static final class SyntheticEnrollment {
-        private static final Object INSTANCE = build();
+    // BiometricManager.getEnrolledBiometrics() -> List<BiometricManager.BiometricInfo>.
+    // Returns a synthetic single-entry list so API-30+ apps see "enrolled".
+    private static final XC_MethodHook RETURN_ENROLLED_BIOMETRICS = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            DiagnosticLogger.callSpoofed(
+                    param.method.getDeclaringClass().getName(),
+                    param.method.getName(),
+                    param.args,
+                    "non-empty");
+            param.setResult(SyntheticEnrollment.BIOMETRIC_INSTANCE);
+        }
+    };
 
-        private static Object build() {
+    private static final class SyntheticEnrollment {
+        private static final Object INSTANCE = build("android.hardware.fingerprint.Fingerprint");
+        // BiometricManager.BiometricInfo list (API 28+). Apps that check
+        // getEnrolledBiometrics() see "biometric enrolled" instead of empty.
+        private static final Object BIOMETRIC_INSTANCE = build("android.hardware.biometrics.BiometricManager$BiometricInfo");
+
+        private static Object build(String className) {
             try {
-                Class<?> fpc = Class.forName("android.hardware.fingerprint.Fingerprint");
-                java.lang.reflect.Constructor<?> ctor = fpc.getDeclaredConstructor(
-                        byte[].class, int.class, int.class, CharSequence.class, int.class);
-                ctor.setAccessible(true);
-                Object fp = ctor.newInstance(new byte[1], 0, 1, "fp", 0);
+                Class<?> c = Class.forName(className);
+                // Try every known signature across API levels until one works.
+                java.lang.reflect.Constructor<?>[] ctors = c.getDeclaredConstructors();
+                Object proto = null;
+                for (java.lang.reflect.Constructor<?> cand : ctors) {
+                    Class<?>[] pt = cand.getParameterTypes();
+                    boolean allPrimitive = true;
+                    for (Class<?> p : pt) {
+                        if (!p.isPrimitive()) {
+                            allPrimitive = false;
+                            break;
+                        }
+                    }
+                    try {
+                        cand.setAccessible(true);
+                        Object[] args = new Object[pt.length];
+                        if (!allPrimitive) {
+                            // Fingerprint-Family: first arg is the enrollment NAME
+                            // (byte[] pre-26, CharSequence 26+). Only attempt these.
+                            if (pt.length == 0) {
+                                continue;
+                            }
+                            for (int i = 0; i < pt.length; i++) {
+                                if (pt[i] == int.class) {
+                                    args[i] = (i == 1) ? 1 : 2018;
+                                } else if (pt[i] == long.class) {
+                                    args[i] = 1L;
+                                } else if (pt[i] == boolean.class) {
+                                    args[i] = true;
+                                } else if (pt[i] == CharSequence.class) {
+                                    args[i] = "fp";
+                                } else if (pt[i] == byte[].class) {
+                                    args[i] = new byte[]{'f', 'p'};
+                                } else {
+                                    throw new Throwable("unhandled param type");
+                                }
+                            }
+                        } else {
+                            for (int i = 0; i < pt.length; i++) {
+                                if (pt[i] == int.class) {
+                                    args[i] = (i == 1) ? 1 : 2018;
+                                } else if (pt[i] == long.class) {
+                                    args[i] = 1L;
+                                } else if (pt[i] == boolean.class) {
+                                    args[i] = true;
+                                } else if (pt[i] == char.class) {
+                                    args[i] = '!';
+                                } else {
+                                    args[i] = (byte) 0;
+                                }
+                            }
+                        }
+                        proto = cand.newInstance(args);
+                        break;
+                    } catch (Throwable ignore) {
+                        // try next ctor
+                    }
+                }
+                if (proto == null) {
+                    return Collections.emptyList();
+                }
                 ArrayList<Object> list = new ArrayList<>(1);
-                list.add(fp);
+                list.add(proto);
                 return Collections.unmodifiableList(list);
             } catch (Throwable t) {
-                return Collections.EMPTY_LIST;
+                return Collections.emptyList();
             }
         }
     };
@@ -196,6 +285,41 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                             "AUTHENTICATORS->DEVICE_CREDENTIAL(0x8000)");
                     param.setResult(forced);
                 }
+            }
+        }
+    };
+
+    // Part 2.1 hooks from the UNIVERSAL-BY-PASS plan: force the builder itself
+    // to ALLOW the device credential. This is the rosetta-stone hook for the
+    // AndroidX & framework PromptInfo.Builder classes:
+    //   - setDeviceCredentialAllowed(true)  -> system may use PIN
+    //   - setConfirmationRequired(false)    -> PIN prompt appears immediately
+    //   - setAllowedAuthenticators(...)     -> OR-in DEVICE_CREDENTIAL
+    private static final XC_MethodHook FORCE_DEVICE_CREDENTIAL_BUILDER = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            String name = param.method.getName();
+            try {
+                if (name.equals("setDeviceCredentialAllowed")) {
+                    param.args[0] = Boolean.TRUE;
+                    DiagnosticLogger.callSpoofed(
+                            param.method.getDeclaringClass().getName(), name, param.args, "true");
+                } else if (name.equals("setConfirmationRequired")) {
+                    param.args[0] = Boolean.FALSE;
+                    DiagnosticLogger.callSpoofed(
+                            param.method.getDeclaringClass().getName(), name, param.args, "false");
+                } else if (name.equals("setAllowedAuthenticators")
+                        && param.args != null && param.args.length > 0
+                        && param.args[0] instanceof Integer) {
+                    int orig = (Integer) param.args[0];
+                    // OR-in DEVICE_CREDENTIAL while preserving the original flags.
+                    param.args[0] = orig | AUTHENTICATOR_DEVICE_CREDENTIAL;
+                    DiagnosticLogger.callSpoofed(
+                            param.method.getDeclaringClass().getName(), name, param.args,
+                            "AUTHENTICATORS|0x8000");
+                }
+            } catch (Throwable t) {
+                // no-op: never let a logging failure break the app
             }
         }
     };
@@ -441,6 +565,7 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 // Hidden: returns the raw enrolled-fingerprint list (some apps /
                 // internal APIs consult it directly instead of the boolean).
                 hookSafely(fpClass, "getEnrolledFingerprints", int.class, RETURN_ENROLLED_LIST);
+                hookAllSafely(fpClass, "getEnrolledFingerprints", RETURN_ENROLLED_LIST);
             }
         } catch (Throwable t) {
             logError("FingerprintManager hook failure", t);
@@ -508,15 +633,17 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
 
         // BiometricManager.getEnrolledBiometrics(int, String) (API 30+) - returns
-        // the enrolled biometric info list; empty list means NOT_ENROLLED.
+        // the enrolled biometric info list; empty list means NOT_ENROLLED. On real
+        // devices with zero prints this returns empty, which gates out fingerprint
+        // setup. We return a synthetic non-empty BiometricInfo list instead.
         try {
             Class<?> bioClass = XposedHelpers.findClassIfExists(
                     "android.hardware.biometrics.BiometricManager", classLoader);
             if (bioClass != null) {
-                hookSafely(bioClass, "getEnrolledBiometrics", int.class, String.class, OBSERVE_RESULT);
+                hookAllSafely(bioClass, "getEnrolledBiometrics", RETURN_ENROLLED_BIOMETRICS);
             }
         } catch (Throwable t) {
-            logError("BiometricManager observer failure", t);
+            logError("BiometricManager getEnrolledBiometrics hook failure", t);
         }
     }
 
@@ -534,6 +661,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
      */
     private void hookDeviceCredentialFallback(ClassLoader classLoader) {
         try {
+            // Framework layer 1: BiometricPrompt.authenticate(params) +
+            // Builder.build() rewrite (API 28-29 PromptInfo.Builder / API 30+
+            // BiometricPrompt.Builder -> all funnel into Params/PromptInfo).
             Class<?> bioPrompt = XposedHelpers.findClassIfExists(
                     "android.hardware.biometrics.BiometricPrompt", classLoader);
             Class<?> paramsClass = XposedHelpers.findClassIfExists(
@@ -542,12 +672,69 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 hookSafely(bioPrompt, "authenticate", paramsClass, REWRITE_AUTH_PARAMS);
             }
 
+            // API 28-31: BiometricPrompt$Params$Builder#build()
             Class<?> builder = XposedHelpers.findClassIfExists(
                     "android.hardware.biometrics.BiometricPrompt$Params$Builder", classLoader);
             if (builder != null) {
                 hookAllSafely(builder, "build", REWRITE_BUILT_PARAMS);
             }
 
+            // API 30+: BiometricPrompt$Builder#build() returns PromptInfo.
+            Class<?> modernBuilder = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.BiometricPrompt$Builder", classLoader);
+            if (modernBuilder != null) {
+                hookAllSafely(modernBuilder, "build", REWRITE_BUILT_PARAMS);
+            }
+
+            // SDK 30+ PromptInfo.Builder (the object that carries the mask to
+            // IBiometricService).
+            Class<?> promptInfoBuilder = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.PromptInfo$Builder", classLoader);
+            if (promptInfoBuilder != null) {
+                hookAllSafely(promptInfoBuilder, "build", REWRITE_BUILT_PARAMS);
+            }
+
+            // Part 2.1: force the builder setters so the app itself builds a
+            // credential-allowed prompt (covers framework on all API >= 28).
+            String[] builderNames = new String[]{
+                    "android.hardware.biometrics.BiometricPrompt$Builder",
+                    "android.hardware.biometrics.BiometricPrompt$Params$Builder",
+                    "android.hardware.biometrics.PromptInfo$Builder"
+            };
+            for (String b : builderNames) {
+                Class<?> bc = XposedHelpers.findClassIfExists(b, classLoader);
+                if (bc != null) {
+                    hookAllSafely(bc, "setDeviceCredentialAllowed",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                    hookAllSafely(bc, "setConfirmationRequired",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                    hookAllSafely(bc, "setAllowedAuthenticators",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                }
+            }
+
+            // AndroidX equivalent builders.
+            String[] androidxBuilders = new String[]{
+                    "androidx.biometric.BiometricPrompt$PromptInfo$Builder",
+                    "androidx.biometric.BiometricPrompt$Builder"
+            };
+            for (String b : androidxBuilders) {
+                Class<?> bc = XposedHelpers.findClassIfExists(b, classLoader);
+                if (bc != null) {
+                    hookAllSafely(bc, "setDeviceCredentialAllowed",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                    hookAllSafely(bc, "setConfirmationRequired",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                    hookAllSafely(bc, "setAllowedAuthenticators",
+                            FORCE_DEVICE_CREDENTIAL_BUILDER);
+                }
+            }
+
+            // Framework layer 3: IBiometricService$Stub$Proxy#authenticate - the
+            // in-process AIDL proxy to system BiometricService; rewrites the
+            // Params/PromptInfo argument right before it is marshalled across the
+            // binder. This is the LAST net and works even if the app path avoids
+            // every builder above.
             Class<?> proxy = XposedHelpers.findClassIfExists(
                     "android.hardware.biometrics.IBiometricService$Stub$Proxy", classLoader);
             if (proxy != null) {
