@@ -80,6 +80,27 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *     development_settings_enabled -> 0/off, plus Debug.isDebuggerConnected()
  *     -> false). Harmless for normal apps, satisfies bank anti-debug checks.
  *
+ * v1.1.7 - OBFUSCATION-PROOF ANDROIDX HOOKS. Some apps (Meezan Bank / OFSS
+ *   Digix = a Cordova app) bundle an R8-obfuscated copy of androidx.biometric
+ *   where every method is renamed: BiometricManager.from()->h();
+ *   canAuthenticate()->a(); canAuthenticate(int)->b(int);
+ *   PromptInfo$Builder.setAllowedAuthenticators()->b(int);
+ *   PromptInfo$Builder.build()->a(); PromptInfo.getAllowedAuthenticators()->a().
+ *   Canonical-name hooks (setAllowedAuthenticators / canAuthenticate / build)
+ *   silently NoSuchMethod in such apps -> the availability gate reports real
+ *   AndroidX state and the prompt is never credential-allowed.
+ *   FIX: additionally hook AndroidX classes BY METHOD SIGNATURE, which cannot
+ *   be obfuscated away:
+ *     - androidx.biometric.BiometricManager: every non-static ()int and
+ *       (int)int method IS canAuthenticate()/canAuthenticate(int) -> 0.
+ *     - androidx.biometric.BiometricPrompt$PromptInfo$Builder /
+ *       $BiometricPrompt$Builder: any (int)->Builder method IS
+ *       setAllowedAuthenticators -> OR-in DEVICE_CREDENTIAL; any ()->PromptInfo
+ *       method IS build() -> force DEVICE_CREDENTIAL on the built PromptInfo.
+ *   The framework bridge in these apps still calls the canonical
+ *   android.hardware.biometrics.* methods (never obfuscated), so the
+ *   framework/service nets remain valid on top.
+ *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
  *
@@ -396,6 +417,93 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
+    // v1.1.7: signature-based builder spoof - ORs DEVICE_CREDENTIAL into the
+    // authenticator int of ANY (int)->Builder method on the AndroidX builders,
+    // regardless of its obfuscated name (setAllowedAuthenticators may be
+    // renamed to b()/etc. by R8 inside the app's bundled androidx.biometric).
+    private static final XC_MethodHook FORCE_INT_AUTHENTICATORS = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                if (param.args != null && param.args.length == 1 && param.args[0] instanceof Integer) {
+                    int orig = (Integer) param.args[0];
+                    if ((orig & AUTHENTICATOR_DEVICE_CREDENTIAL) == 0) {
+                        param.args[0] = orig | AUTHENTICATOR_DEVICE_CREDENTIAL;
+                        DiagnosticLogger.callSpoofed(
+                                param.method.getDeclaringClass().getName(),
+                                param.method.getName(),
+                                param.args,
+                                "AUTHENTICATORS|0x8000");
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+
+    // v1.1.7: rewrites a freshly built androidx.biometric.BiometricPrompt
+    // PromptInfo so its authenticator mask carries DEVICE_CREDENTIAL, even
+    // when the app bundles an R8-obfuscated AndroidX (field + getter names
+    // renamed). Only the (single) int field holding the mask is updated.
+    private static final XC_MethodHook REWRITE_ANDROIDX_PROMPTINFO = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            try {
+                Object built = param.getResult();
+                if (built == null || !built.getClass().getName()
+                        .equals("androidx.biometric.BiometricPrompt$PromptInfo")) {
+                    return;
+                }
+                Class<?> c = built.getClass();
+                Method getter = null;
+                for (Method m : c.getDeclaredMethods()) {
+                    if (m.getParameterCount() == 0 && m.getReturnType() == int.class) {
+                        getter = m;
+                        break;
+                    }
+                }
+                if (getter == null) {
+                    return;
+                }
+                getter.setAccessible(true);
+                Object r = getter.invoke(built);
+                if (!(r instanceof Integer)) {
+                    return;
+                }
+                int current = (Integer) r;
+                if ((current & AUTHENTICATOR_DEVICE_CREDENTIAL) != 0) {
+                    return;
+                }
+                Field maskField = null;
+                Class<?> walk = c;
+                outer:
+                while (walk != null) {
+                    for (Field f : walk.getDeclaredFields()) {
+                        if (f.getType() == int.class) {
+                            f.setAccessible(true);
+                            if (((Integer) f.get(built)).intValue() == current) {
+                                maskField = f;
+                                break outer;
+                            }
+                        }
+                    }
+                    walk = walk.getSuperclass();
+                }
+                if (maskField == null) {
+                    return;
+                }
+                maskField.setInt(built, current | AUTHENTICATOR_DEVICE_CREDENTIAL);
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args,
+                        "androidx PromptInfo AUTHENTICATORS->0x"
+                                + Integer.toHexString(current | AUTHENTICATOR_DEVICE_CREDENTIAL));
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+
     private static boolean isPromptParams(Object o) {
         if (o == null) {
             return false;
@@ -627,6 +735,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         hookFingerprintManager(lpparam.classLoader);
         hookBiometricManager(lpparam.classLoader);
         hookAndroidXBiometrics(lpparam.classLoader);
+        // v1.1.7: obfuscation-proof AndroidX hooks (R8-renamed androidx.biometric
+        // in bank apps like Meezan), matched by signature not by method name.
+        hookAndroidxBySignature(lpparam.classLoader);
         hookObserversOnly(lpparam.classLoader);
         hookDeviceCredentialFallback(lpparam.classLoader);
         // v1.1.6: universal dev-option/ADB spoof for EVERY app process (bank
@@ -698,6 +809,97 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             logError("AndroidX Biometric hook failure", t);
+        }
+    }
+
+    /**
+     * v1.1.7: signature-based AndroidX hooks (obfuscation-proof). Apps such as
+     * Meezan Bank (OFSS Digix, Cordova) bundle an R8-obfuscated copy of
+     * androidx.biometric where canAuthenticate()=a(), canAuthenticate(int)=b(int),
+     * setAllowedAuthenticators(int)=b(int), build()=a() - so canonical-name hooks
+     * NoSuchMethod and the app's availability gate + prompt rewrite silently fail.
+     * Matching BY SIGNATURE is immune to renaming:
+     *   - BiometricManager: every non-static ()int and (int)int instance method
+     *     is a canAuthenticate(...) overload -> return BIOMETRIC_SUCCESS.
+     *   - PromptInfo$Builder / BiometricPrompt$Builder: (int)->Builder ==
+     *     setAllowedAuthenticators -> OR-in DEVICE_CREDENTIAL; ()->PromptInfo ==
+     *     build() -> force DEVICE_CREDENTIAL on the built object.
+     * Works for BOTH obfuscated and clean AndroidX (double coverage is harmless).
+     */
+    private void hookAndroidxBySignature(ClassLoader classLoader) {
+        try {
+            Class<?> bm = XposedHelpers.findClassIfExists(
+                    "androidx.biometric.BiometricManager", classLoader);
+            if (bm != null) {
+                for (Method m : bm.getDeclaredMethods()) {
+                    if (m.getReturnType() != int.class
+                            || java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                        continue;
+                    }
+                    Class<?>[] pt = m.getParameterTypes();
+                    if (pt.length == 0 || (pt.length == 1 && pt[0] == int.class)) {
+                        try {
+                            XposedBridge.hookMethod(m, RETURN_BIOMETRIC_SUCCESS);
+                            hooksInstalled++;
+                            DiagnosticLogger.log("INSTALL_OK class=" + bm.getName()
+                                    + " method=" + m.getName() + " (sig canAuthenticate) -> 0");
+                        } catch (Throwable t) {
+                            hooksFailed++;
+                            DiagnosticLogger.hookFailed(bm.getName(), m.getName(),
+                                    "sig-hook: " + t.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            logError("AndroidX sig hook (BiometricManager) failure", t);
+        }
+
+        String[] builders = new String[]{
+                "androidx.biometric.BiometricPrompt$PromptInfo$Builder",
+                "androidx.biometric.BiometricPrompt$Builder"
+        };
+        for (String bn : builders) {
+            try {
+                Class<?> bc = XposedHelpers.findClassIfExists(bn, classLoader);
+                if (bc == null) {
+                    continue;
+                }
+                Class<?> promptInfoCls = XposedHelpers.findClassIfExists(
+                        "androidx.biometric.BiometricPrompt$PromptInfo", classLoader);
+                for (Method m : bc.getDeclaredMethods()) {
+                    Class<?>[] pt = m.getParameterTypes();
+                    boolean isBuilderReturn = m.getReturnType() == bc;
+                    if (isBuilderReturn && pt.length == 1 && pt[0] == int.class) {
+                        try {
+                            XposedBridge.hookMethod(m, FORCE_INT_AUTHENTICATORS);
+                            hooksInstalled++;
+                            DiagnosticLogger.log("INSTALL_OK class=" + bc.getName()
+                                    + " method=" + m.getName()
+                                    + " (sig setAllowedAuthenticators) |0x8000");
+                        } catch (Throwable t) {
+                            hooksFailed++;
+                            DiagnosticLogger.hookFailed(bc.getName(), m.getName(),
+                                    "sig-hook: " + t.getMessage());
+                        }
+                    } else if (pt.length == 0
+                            && promptInfoCls != null && m.getReturnType() == promptInfoCls) {
+                        try {
+                            XposedBridge.hookMethod(m, REWRITE_ANDROIDX_PROMPTINFO);
+                            hooksInstalled++;
+                            DiagnosticLogger.log("INSTALL_OK class=" + bc.getName()
+                                    + " method=" + m.getName()
+                                    + " (sig build) force credential");
+                        } catch (Throwable t) {
+                            hooksFailed++;
+                            DiagnosticLogger.hookFailed(bc.getName(), m.getName(),
+                                    "sig-hook: " + t.getMessage());
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                logError("AndroidX sig hook (builder) failure: " + bn, t);
+            }
         }
     }
 
