@@ -2,9 +2,9 @@
 <resources>
 <string-array name="xposed_scope">
         <item>android</item>
-        <!-- FIX BUILD (v1.1.2): active test target = Upaisa, plus the bank app
-             (AmbitionWise) kept so the dev-option spoof covers it too; control
-             app reserved for A/B validation. -->
+        <!-- v1.1.3: active test targets = Upaisa + AmbitionWise (Faysal Bank)
+             for the DEVICE_CREDENTIAL (PIN) fallback; control app reserved for
+             A/B validation. -->
         <item>pk.upaisa.com</item>
         <item>com.avanza.ambitwizfbl</item>
         <item>com.example.kieun.biometricprompt</item>

@@ -1,13 +1,17 @@
 package com.jamamjad.biometricbypass;
 
-import android.content.ContentResolver;
 import android.hardware.biometrics.BiometricManager;
 import android.os.Build;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Set;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
@@ -18,14 +22,31 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  * - Supports AOSP, AndroidX, and legacy hardware compatibility APIs.
  *
  * ============================================================================
- * FIX BUILD (v1.1.1+) - closes the "No fingerprint enrolled" gaps found on the
- * target device (Samsung Galaxy A52, Android 16 / SDK 36, Vector/LSPosed).
+ * v1.1.3 - DEVICE-CREDENTIAL (PIN) FALLBACK (the real bypass), removes the
+ * v1.1.2 developer-option/USB-debugging spoof.
  *
- * v1.1.2 adds developer-option/USB-debugging spoofing: Faysal Bank refuses to
- * start while USB debugging or Developer options are enabled, and reads that
- * state from the Settings provider in its own process. The module returns the
- * "off" value for adb_enabled / adb_wifi_enabled / development_settings_enabled
- * so the banking app starts normally while real adb keeps working.
+ * The device has REAL enrolled fingerprints = 0, so system BiometricService
+ * answers ERROR_NO_BIOMETRICS (11) before any prompt can appear. The app-side
+ * canAuthenticate spoof cannot change that server-side check. Solution:
+ * intercept the biometric request in the app process BEFORE it reaches
+ * BiometricService, and force `BiometricManager.Authenticators.DEVICE_CREDENTIAL`
+ * (0x8000) into the allowed authenticators. BiometricService then shows the
+ * real device PIN screen; on correct PIN entry it mints a genuine auth token
+ * and delivers onAuthenticationSucceeded - so the app believes the "fingerprint"
+ * authentication really worked (identical to Google's own PIN-fallback UX).
+ *
+ * Three defense-in-depth interception layers (all app-process only):
+ *   1) BiometricPrompt$Params$Builder#build()   - rewrites the freshly built
+ *      Params so EVERY downstream path (framework + AndroidX alike) carries
+ *      DEVICE_CREDENTIAL.
+ *   2) BiometricPrompt#authenticate(Params)     - catches callers that supply
+ *      a pre-built Params without going through the Builder hook.
+ *   3) IBiometricService$Stub$Proxy#authenticate - the AIDL proxy used inside
+ *      this process to talk to system BiometricService; the last net before
+ *      the system server sees the request.
+ *
+ * No system files are modified. This is 100% LSPosed-level.
+ * ============================================================================
  *
  * Verified during Step 6 on-device diagnostics:
  *   - Module loads into com.avanza.ambitwizfbl (bank app) - confirmed by
@@ -46,6 +67,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "BiometricHook";
     private static final boolean DEBUG = true; // Diagnostic build: log all hook activity
+
+    /** BiometricManager.Authenticators.DEVICE_CREDENTIAL = (1 << 15) = 0x8000 */
+    private static final int AUTHENTICATOR_DEVICE_CREDENTIAL = 0x8000;
 
     // Reusable singers to prevent excessive object allocation
     private static final XC_MethodHook RETURN_TRUE = new XC_MethodHook() {
@@ -119,59 +143,211 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
-    // --- Developer-option / USB-debugging spoofing -------------------------
-    // Faysal Bank (and similar apps) refuses to start while USB debugging or
-    // Developer options are ON. These are read from the Settings provider in
-    // the app's own process. We return the "off" value for the specific keys,
-    // so the app cannot tell that developer mode is active. The DEVICE's real
-    // settings are untouched - adb keeps working normally.
-    private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF = new XC_MethodHook() {
+    // --- DEVICE-CREDENTIAL (PIN) FALLBACK -----------------------------------
+    // Rewrites the authenticators of any BiometricPrompt request to DEVICE_CREDENTIAL
+    // (0x8000), so system BiometricService shows the PIN screen instead of failing
+    // with ERROR_NO_BIOMETRICS when zero fingerprints are enrolled. The token minted
+    // for the PIN is a genuine credential token, so onAuthenticationSucceeded fires.
+    private static final XC_MethodHook REWRITE_AUTH_PARAMS = new XC_MethodHook() {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
-            if (isDeveloperOptionKey(param.args[1])) {
-                DiagnosticLogger.callSpoofed(
-                        param.method.getDeclaringClass().getName(),
-                        param.method.getName(),
-                        param.args, 0);
-                param.setResult(0);
+            if (param.args == null || param.args.length == 0) {
+                return;
+            }
+            for (int i = 0; i < param.args.length; i++) {
+                Object a = param.args[i];
+                if (isPromptParams(a)) {
+                    Object forced = forceDeviceCredential(a);
+                    if (forced != null && forced != a) {
+                        DiagnosticLogger.callSpoofed(
+                                param.method.getDeclaringClass().getName(),
+                                param.method.getName(),
+                                param.args,
+                                "AUTHENTICATORS->DEVICE_CREDENTIAL(0x8000)");
+                        param.setArg(i, forced);
+                    }
+                }
             }
         }
     };
 
-    private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF_DEFAULT = new XC_MethodHook() {
+    // Rewrites the RESULT of BiometricPrompt$Params$Builder#build().
+    private static final XC_MethodHook REWRITE_BUILT_PARAMS = new XC_MethodHook() {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (isDeveloperOptionKey(param.args[1])) {
-                DiagnosticLogger.callSpoofed(
-                        param.method.getDeclaringClass().getName(),
-                        param.method.getName(),
-                        param.args, 0);
-                param.setResult(0);
+        protected void afterHookedMethod(MethodHookParam param) {
+            Object built = param.getResult();
+            if (isPromptParams(built)) {
+                Object forced = forceDeviceCredential(built);
+                if (forced != null && forced != built) {
+                    DiagnosticLogger.callSpoofed(
+                            param.method.getDeclaringClass().getName(),
+                            param.method.getName(),
+                            param.args,
+                            "AUTHENTICATORS->DEVICE_CREDENTIAL(0x8000)");
+                    param.setResult(forced);
+                }
             }
         }
     };
 
-    private static final XC_MethodHook RETURN_DEV_OPTIONS_NULL = new XC_MethodHook() {
-        @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (isDeveloperOptionKey(param.args[1])) {
-                DiagnosticLogger.callSpoofed(
-                        param.method.getDeclaringClass().getName(),
-                        param.method.getName(),
-                        param.args, "null");
-                param.setResult(null);
-            }
-        }
-    };
-
-    private static boolean isDeveloperOptionKey(Object arg) {
-        if (!(arg instanceof String)) {
+    private static boolean isPromptParams(Object o) {
+        if (o == null) {
             return false;
         }
-        String key = (String) arg;
-        return key.equalsIgnoreCase("adb_enabled")
-                || key.equalsIgnoreCase("adb_wifi_enabled")
-                || key.equalsIgnoreCase("development_settings_enabled");
+        String n = o.getClass().getName();
+        return n.equals("android.hardware.biometrics.BiometricPrompt$Params")
+                || n.equals("android.hardware.biometrics.BiometricPrompt$AuthenticationParams")
+                || n.startsWith("android.hardware.biometrics.BiometricPrompt$");
+    }
+
+    private static int getAllowedAuthenticators(Object params) {
+        try {
+            Method m = params.getClass().getMethod("getAllowedAuthenticators");
+            Object r = m.invoke(params);
+            if (r instanceof Integer) {
+                return (Integer) r;
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private static boolean readBoolMethod(Object params, String name) {
+        try {
+            Method m = params.getClass().getMethod(name);
+            Object r = m.invoke(params);
+            if (r instanceof Boolean) {
+                return (Boolean) r;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * Forces a BiometricPrompt Params object to use DEVICE_CREDENTIAL.
+     * Strategy: (1) overwrite the private final mAllowedAuthenticators field in
+     * place (preserves the entire object, including title/opPackageName/flags);
+     * (2) if the platform refuses field writes, rebuild the same AuthenticationParams
+     * shape with the forced authenticator via its public constructor / Builder.
+     */
+    private static Object forceDeviceCredential(Object params) {
+        if (params == null) {
+            return null;
+        }
+        int current = getAllowedAuthenticators(params);
+        if (current == -1) {
+            // Unreadable - leave untouched rather than risk a broken Parcelable.
+            return params;
+        }
+        // Already credential-guided (credential-only or biometric+credential):
+        // BiometricService auto-falls back to PIN when nothing is enrolled.
+        if ((current & AUTHENTICATOR_DEVICE_CREDENTIAL) != 0) {
+            return params;
+        }
+        if (overwriteAllowedAuthenticators(params, AUTHENTICATOR_DEVICE_CREDENTIAL)) {
+            return params;
+        }
+        Object rebuilt = rebuildAuthenticationParams(params);
+        return rebuilt != null ? rebuilt : params;
+    }
+
+    private static boolean overwriteAllowedAuthenticators(Object params, int value) {
+        try {
+            Class<?> c = params.getClass();
+            Field f = null;
+            while (c != null && f == null) {
+                try {
+                    f = c.getDeclaredField("mAllowedAuthenticators");
+                } catch (NoSuchFieldException e) {
+                    c = c.getSuperclass();
+                }
+            }
+            if (f == null) {
+                return false;
+            }
+            f.setAccessible(true);
+            f.setInt(params, value);
+            return getAllowedAuthenticators(params) == value;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Rebuilds a Params/AuthenticationParams object as AuthenticationParams with
+     * the forced authenticator, preserving the boolean flags the caller set.
+     */
+    private static Object rebuildAuthenticationParams(Object original) {
+        try {
+            // Walk to the concrete AuthenticationParams class if we only see Params.
+            Class<?> target = original.getClass();
+            if (!target.getName().equals("android.hardware.biometrics.BiometricPrompt$AuthenticationParams")) {
+                Class<?> loaded = XposedHelpers.findClassIfExists(
+                        "android.hardware.biometrics.BiometricPrompt$AuthenticationParams",
+                        original.getClass().getClassLoader());
+                if (loaded != null) {
+                    target = loaded;
+                }
+            }
+            Constructor<?>[] ctors = target.getDeclaredConstructors();
+            for (Constructor<?> c : ctors) {
+                Class<?>[] types = c.getParameterTypes();
+                if (types.length < 1 || types[0] != int.class) {
+                    continue;
+                }
+                boolean allBoolean = true;
+                for (int i = 1; i < types.length; i++) {
+                    if (types[i] != boolean.class) {
+                        allBoolean = false;
+                        break;
+                    }
+                }
+                if (!allBoolean) {
+                    continue;
+                }
+                c.setAccessible(true);
+                Object[] args = new Object[types.length];
+                args[0] = AUTHENTICATOR_DEVICE_CREDENTIAL;
+                boolean confirm = readBoolMethod(original, "isConfirmCredentialRequired");
+                boolean promptEnabled = readBoolMethod(original, "isBiometricPromptEnabled");
+                boolean ignoreEnrollment = readBoolMethod(original, "isIgnoreEnrollmentState");
+                boolean disallowSkip = readBoolMethod(original, "isDisallowSkipPrompt");
+                for (int i = 1; i < args.length; i++) {
+                    switch (i - 1) {
+                        case 0:
+                            args[i] = confirm;
+                            break;
+                        case 1:
+                            args[i] = promptEnabled;
+                            break;
+                        case 2:
+                            args[i] = ignoreEnrollment;
+                            break;
+                        case 3:
+                            args[i] = disallowSkip;
+                            break;
+                        default:
+                            args[i] = false;
+                            break;
+                    }
+                }
+                return c.newInstance(args);
+            }
+
+            // Last resort: the public Builder API.
+            Class<?> builderClass = XposedHelpers.findClassIfExists(
+                    target.getName() + "$Builder", target.getClassLoader());
+            if (builderClass != null) {
+                Object builder = builderClass.getDeclaredConstructor().newInstance();
+                XposedHelpers.callMethod(builder, "setAllowedAuthenticators",
+                        AUTHENTICATOR_DEVICE_CREDENTIAL);
+                return XposedHelpers.callMethod(builder, "build");
+            }
+        } catch (Throwable t) {
+            logError("rebuildAuthenticationParams failed", t);
+        }
+        return null;
     }
 
     private int hooksInstalled;
@@ -195,7 +371,7 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         hookBiometricManager(lpparam.classLoader);
         hookAndroidXBiometrics(lpparam.classLoader);
         hookObserversOnly(lpparam.classLoader);
-        hookDeveloperOptionDetectors(lpparam.classLoader);
+        hookDeviceCredentialFallback(lpparam.classLoader);
 
         // Install summary, per process, for the diagnostic report.
         DiagnosticLogger.log("INSTALL_SUMMARY installed=" + hooksInstalled
@@ -295,30 +471,40 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Spoofs "developer options / USB debugging are OFF" when the target app
-     * reads the Settings provider, without touching the real device settings.
-     * Covered: Settings.Global, Settings.Secure, Settings.System.
+     * v1.1.3 core: forces every biometric request in this app process to use the
+     * DEVICE-CREDENTIAL (PIN) path, replacing the removed v1.1.2 dev-option spoof.
+     *
+     * 1) BiometricPrompt$Params$Builder#build() - rewrites the built Params; both
+     *    framework BiometricPrompt and AndroidX build their Params with this Builder.
+     * 2) BiometricPrompt#authenticate(Params) - catches callers passing a pre-built
+     *    Params object directly.
+     * 3) IBiometricService$Stub$Proxy#authenticate(...) - the in-process AIDL proxy
+     *    to system BiometricService; rewrites the Params argument right before it is
+     *    marshalled across the binder.
      */
-    private void hookDeveloperOptionDetectors(ClassLoader classLoader) {
-        String[] settingsClasses = {
-                "android.provider.Settings$Global",
-                "android.provider.Settings$Secure",
-                "android.provider.Settings$System"
-        };
-        for (String className : settingsClasses) {
-            try {
-                Class<?> settings = XposedHelpers.findClassIfExists(className, classLoader);
-                if (settings != null) {
-                    hookSafely(settings, "getInt",
-                            ContentResolver.class, String.class, RETURN_DEV_OPTIONS_OFF);
-                    hookSafely(settings, "getInt",
-                            ContentResolver.class, String.class, int.class, RETURN_DEV_OPTIONS_OFF_DEFAULT);
-                    hookSafely(settings, "getString",
-                            ContentResolver.class, String.class, RETURN_DEV_OPTIONS_NULL);
-                }
-            } catch (Throwable t) {
-                logError("Settings hook failure for " + className, t);
+    private void hookDeviceCredentialFallback(ClassLoader classLoader) {
+        try {
+            Class<?> bioPrompt = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.BiometricPrompt", classLoader);
+            Class<?> paramsClass = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.BiometricPrompt$Params", classLoader);
+            if (bioPrompt != null && paramsClass != null) {
+                hookSafely(bioPrompt, "authenticate", paramsClass, REWRITE_AUTH_PARAMS);
             }
+
+            Class<?> builder = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.BiometricPrompt$Params$Builder", classLoader);
+            if (builder != null) {
+                hookAllSafely(builder, "build", REWRITE_BUILT_PARAMS);
+            }
+
+            Class<?> proxy = XposedHelpers.findClassIfExists(
+                    "android.hardware.biometrics.IBiometricService$Stub$Proxy", classLoader);
+            if (proxy != null) {
+                hookAllSafely(proxy, "authenticate", REWRITE_AUTH_PARAMS);
+            }
+        } catch (Throwable t) {
+            logError("Device-credential fallback hook failure", t);
         }
     }
 
@@ -331,6 +517,20 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
             // Normal across different Android SDK levels / OEM variants
             hooksFailed++;
             DiagnosticLogger.hookFailed(clazz.getName(), methodName, "NoSuchMethod");
+        } catch (Throwable t) {
+            hooksFailed++;
+            DiagnosticLogger.hookFailed(clazz.getName(), methodName, t.getMessage());
+            logError("Error hooking " + clazz.getSimpleName() + "#" + methodName, t);
+        }
+    }
+
+    private void hookAllSafely(Class<?> clazz, String methodName, XC_MethodHook hook) {
+        try {
+            Set<XC_MethodHook.Unhook> unhooks = XposedBridge.hookAllMethods(clazz, methodName, hook);
+            hooksInstalled += unhooks.size();
+            DiagnosticLogger.log("INSTALL_OK class=" + clazz.getName()
+                    + " method=" + methodName
+                    + " overloads=" + unhooks.size());
         } catch (Throwable t) {
             hooksFailed++;
             DiagnosticLogger.hookFailed(clazz.getName(), methodName, t.getMessage());
