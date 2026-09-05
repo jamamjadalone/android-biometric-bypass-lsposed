@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string-array name="xposed_scope">
+<string-array name="xposed_scope">
         <item>android</item>
+        <!-- DIAGNOSTIC BUILD (Step 5): control app added so the module is
+             loaded into its process and hook activity can be observed.
+             This is instrumentation scope only - no return behavior changed. -->
+        <item>com.example.kieun.biometricprompt</item>
     </string-array>
 </resources>
