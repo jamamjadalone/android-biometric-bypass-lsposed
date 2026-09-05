@@ -2,10 +2,10 @@
 <resources>
 <string-array name="xposed_scope">
         <item>android</item>
-        <!-- FIX BUILD (v1.1.1): bank app (AmbitionWise / Faysal Bank) is the
-             verified target from on-device Vector scope; control app kept for
-             A/B validation. Hooking the app process is what makes
-             canAuthenticate() return SUCCESS there. -->
+        <!-- FIX BUILD (v1.1.2): active test target = Upaisa, plus the bank app
+             (AmbitionWise) kept so the dev-option spoof covers it too; control
+             app reserved for A/B validation. -->
+        <item>pk.upaisa.com</item>
         <item>com.avanza.ambitwizfbl</item>
         <item>com.example.kieun.biometricprompt</item>
     </string-array>

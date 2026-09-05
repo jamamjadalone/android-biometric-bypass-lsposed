@@ -1,5 +1,6 @@
 package com.jamamjad.biometricbypass;
 
+import android.content.ContentResolver;
 import android.hardware.biometrics.BiometricManager;
 import android.os.Build;
 
@@ -17,8 +18,14 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  * - Supports AOSP, AndroidX, and legacy hardware compatibility APIs.
  *
  * ============================================================================
- * FIX BUILD (v1.1.1) - closes the "No fingerprint enrolled" gaps found on the
+ * FIX BUILD (v1.1.1+) - closes the "No fingerprint enrolled" gaps found on the
  * target device (Samsung Galaxy A52, Android 16 / SDK 36, Vector/LSPosed).
+ *
+ * v1.1.2 adds developer-option/USB-debugging spoofing: Faysal Bank refuses to
+ * start while USB debugging or Developer options are enabled, and reads that
+ * state from the Settings provider in its own process. The module returns the
+ * "off" value for adb_enabled / adb_wifi_enabled / development_settings_enabled
+ * so the banking app starts normally while real adb keeps working.
  *
  * Verified during Step 6 on-device diagnostics:
  *   - Module loads into com.avanza.ambitwizfbl (bank app) - confirmed by
@@ -112,6 +119,61 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
+    // --- Developer-option / USB-debugging spoofing -------------------------
+    // Faysal Bank (and similar apps) refuses to start while USB debugging or
+    // Developer options are ON. These are read from the Settings provider in
+    // the app's own process. We return the "off" value for the specific keys,
+    // so the app cannot tell that developer mode is active. The DEVICE's real
+    // settings are untouched - adb keeps working normally.
+    private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (isDeveloperOptionKey(param.args[1])) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args, 0);
+                param.setResult(0);
+            }
+        }
+    };
+
+    private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF_DEFAULT = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (isDeveloperOptionKey(param.args[1])) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args, 0);
+                param.setResult(0);
+            }
+        }
+    };
+
+    private static final XC_MethodHook RETURN_DEV_OPTIONS_NULL = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (isDeveloperOptionKey(param.args[1])) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args, "null");
+                param.setResult(null);
+            }
+        }
+    };
+
+    private static boolean isDeveloperOptionKey(Object arg) {
+        if (!(arg instanceof String)) {
+            return false;
+        }
+        String key = (String) arg;
+        return key.equalsIgnoreCase("adb_enabled")
+                || key.equalsIgnoreCase("adb_wifi_enabled")
+                || key.equalsIgnoreCase("development_settings_enabled");
+    }
+
     private int hooksInstalled;
     private int hooksFailed;
 
@@ -133,6 +195,7 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         hookBiometricManager(lpparam.classLoader);
         hookAndroidXBiometrics(lpparam.classLoader);
         hookObserversOnly(lpparam.classLoader);
+        hookDeveloperOptionDetectors(lpparam.classLoader);
 
         // Install summary, per process, for the diagnostic report.
         DiagnosticLogger.log("INSTALL_SUMMARY installed=" + hooksInstalled
@@ -228,6 +291,34 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             logError("BiometricManager observer failure", t);
+        }
+    }
+
+    /**
+     * Spoofs "developer options / USB debugging are OFF" when the target app
+     * reads the Settings provider, without touching the real device settings.
+     * Covered: Settings.Global, Settings.Secure, Settings.System.
+     */
+    private void hookDeveloperOptionDetectors(ClassLoader classLoader) {
+        String[] settingsClasses = {
+                "android.provider.Settings$Global",
+                "android.provider.Settings$Secure",
+                "android.provider.Settings$System"
+        };
+        for (String className : settingsClasses) {
+            try {
+                Class<?> settings = XposedHelpers.findClassIfExists(className, classLoader);
+                if (settings != null) {
+                    hookSafely(settings, "getInt",
+                            ContentResolver.class, String.class, RETURN_DEV_OPTIONS_OFF);
+                    hookSafely(settings, "getInt",
+                            ContentResolver.class, String.class, int.class, RETURN_DEV_OPTIONS_OFF_DEFAULT);
+                    hookSafely(settings, "getString",
+                            ContentResolver.class, String.class, RETURN_DEV_OPTIONS_NULL);
+                }
+            } catch (Throwable t) {
+                logError("Settings hook failure for " + className, t);
+            }
         }
     }
 
