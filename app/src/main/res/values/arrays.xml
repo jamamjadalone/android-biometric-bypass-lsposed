@@ -2,9 +2,11 @@
 <resources>
 <string-array name="xposed_scope">
         <item>android</item>
-        <!-- DIAGNOSTIC BUILD (Step 5): control app added so the module is
-             loaded into its process and hook activity can be observed.
-             This is instrumentation scope only - no return behavior changed. -->
+        <!-- FIX BUILD (v1.1.1): bank app (AmbitionWise / Faysal Bank) is the
+             verified target from on-device Vector scope; control app kept for
+             A/B validation. Hooking the app process is what makes
+             canAuthenticate() return SUCCESS there. -->
+        <item>com.avanza.ambitwizfbl</item>
         <item>com.example.kieun.biometricprompt</item>
     </string-array>
 </resources>

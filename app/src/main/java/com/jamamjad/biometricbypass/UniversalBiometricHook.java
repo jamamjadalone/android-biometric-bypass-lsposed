@@ -2,6 +2,9 @@ package com.jamamjad.biometricbypass;
 
 import android.hardware.biometrics.BiometricManager;
 import android.os.Build;
+
+import java.util.ArrayList;
+import java.util.Collections;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -14,18 +17,21 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  * - Supports AOSP, AndroidX, and legacy hardware compatibility APIs.
  *
  * ============================================================================
- * DIAGNOSTIC BUILD (Step 5) - NO CHANGE TO RETURN BEHAVIOR.
+ * FIX BUILD (v1.1.1) - closes the "No fingerprint enrolled" gaps found on the
+ * target device (Samsung Galaxy A52, Android 16 / SDK 36, Vector/LSPosed).
  *
- * This build only adds structured instrumentation. Every spoof hook logs the
- * call and the override it applies; additional observation-only hooks log the
- * ORIGINAL results of biometric-adjacent queries WITHOUT modifying them.
- * It also logs which package/process the module actually loaded into, so we can
- * verify the LSPosed scope covers the app process (currently arrays.xml scopes
- * ["android"] only, which is a prime suspect for the post-reboot false negative).
- *
- * Logs are written to logcat under tag "BioDiag" and can be read with:
- *   adb logcat -s BioDiag
- * Disable logging at runtime without a rebuild:
+ * Verified during Step 6 on-device diagnostics:
+ *   - Module loads into com.avanza.ambitwizfbl (bank app) - confirmed by
+ *     INSTALL_SUMMARY in that process.
+ *   - androidx.biometric.BiometricManager.canAuthenticate(15) was already
+ *     intercepted and spoofed to 0 (BIOMETRIC_SUCCESS).
+ *   - Remaining coverage gaps on SDK 36:
+ *       * hidden BiometricManager.canAuthenticate(int,int,String) and
+ *         canAuthenticate(int,int,int,String) overloads
+ *       * hidden BiometricManager.hasEnrolledBiometrics()
+ *       * hidden FingerprintManager.getEnrolledFingerprints(int)
+ *     each guarded so an absent method on a given OEM build is a no-op.
+ * Diagnostic logging retained (tag "BioDiag"); disable at runtime with:
  *   adb shell setprop persist.biometric.diag 0
  * ============================================================================
  */
@@ -57,6 +63,40 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                     param.args,
                     BiometricManager.BIOMETRIC_SUCCESS);
             param.setResult(BiometricManager.BIOMETRIC_SUCCESS);
+        }
+    };
+
+    // Spoofs a hidden API that reports the enrolled fingerprint LIST (SDK <=28
+    // style / internal apps). Returns a single synthetic enrollment so callers
+    // that trust this list see "fingerprint enrolled". Built once, safely.
+    private static final XC_MethodHook RETURN_ENROLLED_LIST = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            DiagnosticLogger.callSpoofed(
+                    param.method.getDeclaringClass().getName(),
+                    param.method.getName(),
+                    param.args,
+                    "non-empty");
+            param.setResult(SyntheticEnrollment.INSTANCE);
+        }
+    };
+
+    private static final class SyntheticEnrollment {
+        private static final Object INSTANCE = build();
+
+        private static Object build() {
+            try {
+                Class<?> fpc = Class.forName("android.hardware.fingerprint.Fingerprint");
+                java.lang.reflect.Constructor<?> ctor = fpc.getDeclaredConstructor(
+                        byte[].class, int.class, int.class, CharSequence.class, int.class);
+                ctor.setAccessible(true);
+                Object fp = ctor.newInstance(new byte[1], 0, 1, "fp", 0);
+                ArrayList<Object> list = new ArrayList<>(1);
+                list.add(fp);
+                return Collections.unmodifiableList(list);
+            } catch (Throwable t) {
+                return Collections.EMPTY_LIST;
+            }
         }
     };
 
@@ -109,6 +149,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 hookSafely(fpClass, "isHardwareDetected", RETURN_TRUE);
                 hookSafely(fpClass, "hasEnrolledFingerprints", RETURN_TRUE);
                 hookSafely(fpClass, "hasEnrolledFingerprints", int.class, RETURN_TRUE);
+                // Hidden: returns the raw enrolled-fingerprint list (some apps /
+                // internal APIs consult it directly instead of the boolean).
+                hookSafely(fpClass, "getEnrolledFingerprints", int.class, RETURN_ENROLLED_LIST);
             }
         } catch (Throwable t) {
             logError("FingerprintManager hook failure", t);
@@ -124,6 +167,12 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 hookSafely(bioClass, "canAuthenticate", int.class, RETURN_BIOMETRIC_SUCCESS);
                 // Hook canAuthenticate(int, int) found on specific OEM/API versions
                 hookSafely(bioClass, "canAuthenticate", int.class, int.class, RETURN_BIOMETRIC_SUCCESS);
+                // Hidden overloads present on newer SDK levels (sensor-scoped).
+                hookSafely(bioClass, "canAuthenticate", int.class, int.class, String.class, RETURN_BIOMETRIC_SUCCESS);
+                hookSafely(bioClass, "canAuthenticate", int.class, int.class, int.class, String.class, RETURN_BIOMETRIC_SUCCESS);
+                // Hidden boolean check that some code paths use as the gate for
+                // "is a print enrolled at all" before offering biometrics.
+                hookSafely(bioClass, "hasEnrolledBiometrics", RETURN_TRUE);
             }
         } catch (Throwable t) {
             logError("BiometricManager hook failure", t);
