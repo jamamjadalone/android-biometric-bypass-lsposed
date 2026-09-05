@@ -37,36 +37,13 @@ This module intercepts framework and Jetpack compatibility queries at runtime, s
 
 ## 🏗️ Architecture & Execution Flow
 
-```text
-┌────────────────────────────────────────────────────────┐
-│               Target Android Application               │
-│          (Banking / Enterprise / Authenticator)        │
-└───────────────────────────┬────────────────────────────┘
-                            │ Queries Biometric State
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            Android Framework / Jetpack API             │
-│   • BiometricManager.canAuthenticate(...)              │
-│   • FingerprintManager.isHardwareDetected()            │
-│   • FingerprintManager.hasEnrolledFingerprints(...)    │
-│   • androidx.biometric.BiometricManager                │
-└───────────────────────────┬────────────────────────────┘
-                            │ Intercepted via LSPosed
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│           UniversalBiometricHook (LSPosed)             │
-│  [beforeHookedMethod Short-Circuiting Engine]          │
-│                                                        │
-│  ⚡ Halts call before reaching broken Vendor HAL / TEE  │
-│  ⚡ Injects BiometricManager.BIOMETRIC_SUCCESS (0)     │
-│  ⚡ Injects enrolled state: TRUE                       │
-└───────────────────────────┬────────────────────────────┘
-                            │ Returns Spoofed Health State
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            Application Receives Success Result         │
-│          Enables User Passcode / Fallback Path         │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    App["Target Android Application\n(Banking / Enterprise / Authenticator)"] -->|Queries Biometric State| Framework["Android Framework & Jetpack API\n• BiometricManager.canAuthenticate()\n• FingerprintManager.isHardwareDetected()\n• androidx.biometric.BiometricManager"]
+    Framework -->|Intercepted by LSPosed| Hook["UniversalBiometricHook (LSPosed Core)\nbeforeHookedMethod Short-Circuiting Engine"]
+    Hook -- Halts call before reaching broken Vendor HAL / TEE --> Spoof["Injects BiometricManager.BIOMETRIC_SUCCESS (0)\nInjects hasEnrolledFingerprints = true"]
+    Spoof -->|Returns Guaranteed State| App
+    App -->|Enables Fallback Credential Flow| Success["User Authenticates via PIN / Password"]
 ```
 
 ---
@@ -117,22 +94,16 @@ app/build/outputs/apk/debug/app-debug.apk
 > [!IMPORTANT]
 > **Privacy Notice**: This module performs local, non-persistent method return adjustments inside your device's memory. It **does NOT** store, record, capture, or transmit user credentials, biometric templates, passwords, PINs, or device identifiers. All operations strictly execute on-device within isolated process sandboxes.
 
+For reporting security vulnerabilities, please refer to our [Security Policy](SECURITY.md).
+
+---
+
+## 🤝 Contributing
+
+Contributions, issues, and feature requests are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting pull requests.
+
 ---
 
 ## 📄 License
 
-```text
-Copyright 2026 Jam Amjad
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.

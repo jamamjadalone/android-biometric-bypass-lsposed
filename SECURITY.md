@@ -1,0 +1,35 @@
+# Security Policy
+
+## 🛡️ Supported Versions
+
+We actively maintain and provide security patches for the following versions of **Universal Biometric Redirection Core**:
+
+| Version | Supported          |
+| :---    | :---:              |
+| 1.0.x   | :white_check_mark: |
+| < 1.0   | :x:                |
+
+---
+
+## 🚨 Reporting a Vulnerability
+
+The security of our users and their devices is of paramount importance. If you discover a security vulnerability, flaw, or unexpected exposure in this project, please report it privately.
+
+### Guidelines for Responsible Disclosure:
+- **Do NOT** open a public issue, discussion thread, or pull request disclosing the vulnerability.
+- Please use GitHub's private vulnerability reporting feature directly on the repository via the **Security** tab -> **Report a vulnerability**.
+- Alternatively, you can email the maintainer privately with full technical details, proof-of-concept steps, and environment specifics:
+  - **Email**: `security@jamamjad.com` *(or via direct GitHub advisory)*
+
+### What to Include in Your Report:
+1. Exact device architecture, Android version, and custom ROM details (e.g., LineageOS 22, crDroid, AOSP).
+2. Root solution and LSPosed version used (e.g., Magisk v27 + LSPosed v1.9.2).
+3. Step-by-step reproduction steps demonstrating the issue.
+4. Any potential impact or scope of vulnerability.
+
+### Response Timeline:
+- **Initial Acknowledgement**: Within 48 hours of report submission.
+- **Triage & Validation**: Within 5 business days.
+- **Fix & Public Disclosure**: Coordinated release within 30 days of validation.
+
+Thank you for helping keep this project and the open-source community secure!
