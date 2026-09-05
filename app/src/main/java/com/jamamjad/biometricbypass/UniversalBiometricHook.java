@@ -71,6 +71,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *   - Retains the IBiometricService$Stub$Proxy.authenticate PromptInfo rewrite
  *     as the final in-process net before the binder.
  *
+ * v1.1.6 - UNIVERSAL scope (per new-plan.txt):
+ *   - arrays.xml scope = "*" (load into EVERY app process).
+ *   - handleLoadPackage() SKIPS system_server ("android") so ADB and system
+ *     services stay safe (the previous ADB breakage vector).
+ *   - ADB/developer-option spoofs for EVERY app process (Settings.Global/
+ *     Secure/System getInt/getString for adb_enabled, adb_wifi_enabled and
+ *     development_settings_enabled -> 0/off, plus Debug.isDebuggerConnected()
+ *     -> false). Harmless for normal apps, satisfies bank anti-debug checks.
+ *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
  *
@@ -149,6 +158,69 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                     param.args,
                     "non-empty");
             param.setResult(SyntheticEnrollment.BIOMETRIC_INSTANCE);
+        }
+    };
+
+    // --- v1.1.6 DEV-OPTION / ADB SPOOF (universal) --------------------------
+    // Banks (Meezan, Upaisa, Faysal) refuse to run while Developer Options or
+    // USB debugging are ON. We spoof the settings reads back as "off" inside
+    // every app process (system_server is skipped, so real system state is
+    // untouched and ADB stays alive on the PC side).
+    private static final String KEY_DEVELOPMENT_SETTINGS_ENABLED = "development_settings_enabled";
+    private static final String KEY_ADB_ENABLED = "adb_enabled";
+    private static final String KEY_ADB_WIFI_ENABLED = "adb_wifi_enabled";
+
+    private static boolean isDeveloperOptionKey(Object[] args) {
+        if (args == null || args.length < 2 || !(args[1] instanceof String)) {
+            return false;
+        }
+        String key = (String) args[1];
+        return KEY_DEVELOPMENT_SETTINGS_ENABLED.equals(key)
+                || KEY_ADB_ENABLED.equals(key)
+                || KEY_ADB_WIFI_ENABLED.equals(key);
+    }
+
+    // Settings.Global/Secure/System.getInt(ContentResolver, String, int) and
+    // the (ContentResolver, String) legacy overload -> force 0 (disabled).
+    private static final XC_MethodHook RETURN_DEV_OPTIONS_OFF = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (isDeveloperOptionKey(param.args)) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args,
+                        "0 (disabled)");
+                param.setResult(0);
+            }
+        }
+    };
+
+    // Settings.*.getString(ContentResolver, String) -> "0".
+    private static final XC_MethodHook RETURN_DEV_OPTIONS_NULL = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            if (isDeveloperOptionKey(param.args)) {
+                DiagnosticLogger.callSpoofed(
+                        param.method.getDeclaringClass().getName(),
+                        param.method.getName(),
+                        param.args,
+                        "\"0\" (disabled)");
+                param.setResult("0");
+            }
+        }
+    };
+
+    // Debug.isTracing() / isDebuggerConnected() -> false (some banks probe it).
+    private static final XC_MethodHook RETURN_NOT_TRACING = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            DiagnosticLogger.callSpoofed(
+                    param.method.getDeclaringClass().getName(),
+                    param.method.getName(),
+                    param.args,
+                    "false");
+            param.setResult(false);
         }
     };
 
@@ -529,6 +601,17 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
+        // v1.1.6: CRITICAL - do not inject into system_server. The scope is now
+        // universal ("*"), and without this skip the dev-option/ADB spoofs would
+        // run inside system services where the system itself reads adb_enabled /
+        // development_settings_enabled. Skipping "android" keeps ADB and system
+        // services fully functional (the previous ADB breakage vector).
+        if ("android".equals(lpparam.packageName)) {
+            DiagnosticLogger.setProcessContext(lpparam.packageName, lpparam.processName);
+            DiagnosticLogger.log("Skipping system_server (prevents ADB breakage)");
+            return;
+        }
+
         if (lpparam.classLoader == null) {
             return;
         }
@@ -546,6 +629,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         hookAndroidXBiometrics(lpparam.classLoader);
         hookObserversOnly(lpparam.classLoader);
         hookDeviceCredentialFallback(lpparam.classLoader);
+        // v1.1.6: universal dev-option/ADB spoof for EVERY app process (bank
+        // apps check these settings and refuse to run with dev options on).
+        hookDeveloperOptionsSpoof(lpparam.classLoader);
 
         // Install summary, per process, for the diagnostic report.
         DiagnosticLogger.log("INSTALL_SUMMARY installed=" + hooksInstalled
@@ -742,6 +828,40 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             logError("Device-credential fallback hook failure", t);
+        }
+    }
+
+    /**
+     * v1.1.6: spoofs Developer Options / USB debugging / hierarchy state as OFF
+     * inside every app process (banks refuse to run with them enabled). This is a
+     * pure read-spoof - the real system settings are never written, so ADB on the
+     * PC keeps working. Applied to ALL apps; system_server is skipped (see
+     * handleLoadPackage) so system services read the true values.
+     */
+    private void hookDeveloperOptionsSpoof(ClassLoader classLoader) {
+        String[] settingsClasses = new String[]{
+                "android.provider.Settings$Global",
+                "android.provider.Settings$Secure",
+                "android.provider.Settings$System"
+        };
+        for (String settingsClass : settingsClasses) {
+            Class<?> sc = XposedHelpers.findClassIfExists(settingsClass, classLoader);
+            if (sc == null) {
+                continue;
+            }
+            // getInt(ContentResolver, String)              -> int
+            // getInt(ContentResolver, String, int)         -> int (default)
+            // getInt(ContentResolver, String, int, int)    -> int (legacy)
+            hookAllSafely(sc, "getInt", RETURN_DEV_OPTIONS_OFF);
+            // getString(ContentResolver, String)           -> String
+            hookAllSafely(sc, "getString", RETURN_DEV_OPTIONS_NULL);
+        }
+
+        // Runtime tracing/debugger probes (some banks check isTracing() last).
+        Class<?> debug = XposedHelpers.findClassIfExists("android.os.Debug", classLoader);
+        if (debug != null) {
+            hookAllSafely(debug, "isTracing", RETURN_NOT_TRACING);
+            hookAllSafely(debug, "isDebuggerConnected", RETURN_NOT_TRACING);
         }
     }
 

