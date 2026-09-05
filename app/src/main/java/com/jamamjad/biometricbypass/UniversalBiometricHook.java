@@ -1,5 +1,6 @@
 package com.jamamjad.biometricbypass;
 
+import android.content.Context;
 import android.hardware.biometrics.BiometricManager;
 import android.os.Build;
 
@@ -100,6 +101,30 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *   The framework bridge in these apps still calls the canonical
  *   android.hardware.biometrics.* methods (never obfuscated), so the
  *   framework/service nets remain valid on top.
+ *
+ * v1.1.8 - MEEZAN ENABLE-FINGERPRINT FIX (keystore keygen + OFSS ResourceMapper).
+ *   On-device finding: tapping "Enable Fingerprint" died in
+ *   com.ofss.digx.mobile.android.plugins.fingerprintauth.FingerprintAuth.e()
+ *   with "At least one biometric must be enrolled to create keys requiring
+ *   user authentication for every use". The cause: the plugin branches on
+ *   ResourceMapper.l(ctx) == R.bool.ALLOW_FACE_BIOMETRIC (hardcoded FALSE on
+ *   this build); FALSE branch adds setUserAuthenticationRequired(true).set
+ *   InvalidatedByBiometricEnrollment(true) to the KeyGenParameterSpec, and
+ *   keystore2 rejects keygen while zero fingerprints are enrolled - before any
+ *   BiometricPrompt is shown. The user's device has a PIN but 0 prints.
+ *   FIX (app-process only, OFSS/meezan gated):
+ *     - Force android.security.keystore.KeyGenParameterSpec$Builder
+ *       setUserAuthenticationRequired(boolean) -> false, so the enable-flow
+ *       key is created like Meezan's own "face/allowed" branch does. PIN
+ *       prompt (v1.1.3..v1.1.7 layers) still gates access after enrolment.
+ *     - Force every static (android.content.Context)->boolean accessor on
+ *       com.ofss.digx.mobile.obdxcore.infra.util.ResourceMapper -> true.
+ *       Bind lazily through a ClassLoader.loadClass hook because the class is
+ *       app-sourced and not yet loaded when handleLoadPackage() runs; the
+ *       (Context)->boolean methods are R8-renamed (k/l/m/n/o/p), so they are
+ *       matched by signature, not by name. This makes the enable flow use the
+ *       credential-allowed prompt and unblocks the later "decrypt" (login)
+ *       branch which is itself gated on ResourceMapper.l().
  *
  * No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
@@ -441,6 +466,28 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
+    // v1.1.8: allow OFSS keystore keygen when zero real prints are enrolled.
+    // The app only sets this when R.bool.ALLOW_FACE_BIOMETRIC is false; removing the
+    // user-auth requirement mirrors Meezan's own "secure" branch and the PIN
+    // fallback prompt (v1.1.3+) still gates access at the UI level.
+    private static final XC_MethodHook FORCE_NO_USER_AUTH = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                if (param.args != null && param.args.length == 1
+                        && param.args[0] instanceof Boolean) {
+                    param.args[0] = Boolean.FALSE;
+                    DiagnosticLogger.callSpoofed(
+                            param.method.getDeclaringClass().getName(),
+                            param.method.getName(),
+                            param.args,
+                            "false (no user-auth required)");
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+
     // v1.1.7: rewrites a freshly built androidx.biometric.BiometricPrompt
     // PromptInfo so its authenticator mask carries DEVICE_CREDENTIAL, even
     // when the app bundles an R8-obfuscated AndroidX (field + getter names
@@ -743,6 +790,9 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         // v1.1.6: universal dev-option/ADB spoof for EVERY app process (bank
         // apps check these settings and refuse to run with dev options on).
         hookDeveloperOptionsSpoof(lpparam.classLoader);
+        // v1.1.8: OFSS Digix (Meezan Bank family) enable-fingerprint fix -
+        // keystore keygen without an enrolled biometric + ResourceMapper bools.
+        hookOfssDigix(lpparam.classLoader, lpparam.packageName);
 
         // Install summary, per process, for the diagnostic report.
         DiagnosticLogger.log("INSTALL_SUMMARY installed=" + hooksInstalled
@@ -1064,6 +1114,103 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         if (debug != null) {
             hookAllSafely(debug, "isTracing", RETURN_NOT_TRACING);
             hookAllSafely(debug, "isDebuggerConnected", RETURN_NOT_TRACING);
+        }
+    }
+
+    /**
+     * v1.1.8: Meezan/OFSS Digix enable-fingerprint fix. The Digix
+     * fingerprintauth plugin (Cordova) generates an RSA key with
+     * setUserAuthenticationRequired(true) whenever R.bool.ALLOW_FACE_BIOMETRIC
+     * is false; keystore2 rejects that keygen while zero fingerprints are
+     * enrolled, killing the enable flow before the prompt is shown. We
+     * (1) force setUserAuthenticationRequired(false) and (2) force every
+     * static (Context)->boolean accessor on com.ofss...ResourceMapper to true,
+     * so the app behaves like its own ALLOW_FACE_BIOMETRIC=true branch.
+     * Gated to OFSS Digix package names so non-OFSS apps are untouched.
+     */
+    private static final String OFSS_RESOURCE_MAPPER_CLASS =
+            "com.ofss.digx.mobile.obdxcore.infra.util.ResourceMapper";
+    private static final String OFSS_ALIAS_PROMOTE = "invo8.";
+
+    private void hookOfssDigix(ClassLoader classLoader, String packageName) {
+        if (packageName == null
+                || !(packageName.startsWith(OFSS_ALIAS_PROMOTE)
+                || packageName.contains("ofss")
+                || packageName.contains("digx"))) {
+            return;
+        }
+        DiagnosticLogger.log("OFSS_DIGIX detected package=" + packageName);
+
+        // (1) Force the keystore key to need NO user authentication - the exact
+        // gate that fails with 0 enrolled prints.
+        try {
+            Class<?> spec = XposedHelpers.findClassIfExists(
+                    "android.security.keystore.KeyGenParameterSpec$Builder", classLoader);
+            if (spec != null) {
+                hookSafely(spec, "setUserAuthenticationRequired", boolean.class, FORCE_NO_USER_AUTH);
+            }
+        } catch (Throwable t) {
+            logError("OFSS keystore hook failure", t);
+        }
+
+        // (2) Force every static (Context)->boolean ResourceMapper accessor to
+        // true (R8-renamed k/l/m/n/o/p; matched by signature). The class is
+        // app-sourced, so install eagerly if already loaded, else bind lazily
+        // through a ClassLoader.loadClass hook.
+        Class<?> rm = XposedHelpers.findClassIfExists(OFSS_RESOURCE_MAPPER_CLASS, classLoader);
+        if (rm != null) {
+            bindOfssResourceMapper(rm);
+        } else {
+            try {
+                XposedBridge.hookAllMethods(java.lang.ClassLoader.class, "loadClass",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                if (ofssResourceMapperBound) {
+                                    return;
+                                }
+                                try {
+                                    Object loaded = param.getResult();
+                                    if (loaded instanceof Class
+                                            && OFSS_RESOURCE_MAPPER_CLASS.equals(
+                                            ((Class<?>) loaded).getName())) {
+                                        bindOfssResourceMapper((Class<?>) loaded);
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        });
+            } catch (Throwable t) {
+                logError("OFSS ResourceMapper loadClass hook failure", t);
+            }
+        }
+    }
+
+    private boolean ofssResourceMapperBound;
+
+    private void bindOfssResourceMapper(Class<?> rm) {
+        if (ofssResourceMapperBound) {
+            return;
+        }
+        ofssResourceMapperBound = true;
+        for (Method m : rm.getDeclaredMethods()) {
+            if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                    || m.getReturnType() != boolean.class) {
+                continue;
+            }
+            Class<?>[] pt = m.getParameterTypes();
+            if (pt.length == 1 && pt[0] == Context.class) {
+                try {
+                    XposedBridge.hookMethod(m, RETURN_TRUE);
+                    hooksInstalled++;
+                    DiagnosticLogger.log("INSTALL_OK class=" + rm.getName()
+                            + " method=" + m.getName()
+                            + " (OFSS ResourceMapper bool) -> true");
+                } catch (Throwable t) {
+                    hooksFailed++;
+                    DiagnosticLogger.hookFailed(rm.getName(), m.getName(), t.getMessage());
+                }
+            }
         }
     }
 
