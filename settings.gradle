@@ -10,9 +10,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url 'https://api.xposed.info/' }
+        maven { url 'https://renv.dev/maven' }
+        maven { url 'https://jitpack.io' }
     }
 }
-
 rootProject.name = "android-biometric-bypass-lsposed"
 include ':app'
