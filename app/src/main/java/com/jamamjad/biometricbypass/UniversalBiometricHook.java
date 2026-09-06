@@ -426,24 +426,6 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
-    // Blanks the negative-button text argument on an AndroidX builder.
-    // OFSS Digix (Meezan) sets a negative button, but the credential allowed
-    // invariant forbids it -> build() throws. Forcing the arg to null keeps the
-    // PIN/credential prompt buildable.
-    private static final XC_MethodHook BLANK_NEGATIVE_TEXT = new XC_MethodHook() {
-        @Override
-        protected void beforeHookedMethod(MethodHookParam param) {
-            if (param.args != null && param.args.length > 0) {
-                param.args[0] = null;
-                DiagnosticLogger.callSpoofed(
-                        param.method.getDeclaringClass().getName(),
-                        param.method.getName(),
-                        param.args,
-                        "null (credential allowed forbids negative text)");
-            }
-        }
-    };
-
     // Rewrites the RESULT of BiometricPrompt$Params$Builder#build().
     private static final XC_MethodHook REWRITE_BUILT_PARAMS = new XC_MethodHook() {
         @Override
@@ -1011,24 +993,6 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                             DiagnosticLogger.log("INSTALL_OK class=" + bc.getName()
                                     + " method=" + m.getName()
                                     + " (sig setAllowedAuthenticators) |0x8000");
-                        } catch (Throwable t) {
-                            hooksFailed++;
-                            DiagnosticLogger.hookFailed(bc.getName(), m.getName(),
-                                    "sig-hook: " + t.getMessage());
-                        }
-                    } else if (isBuilderReturn && pt.length == 1
-                            && (pt[0] == CharSequence.class || pt[0] == String.class)) {
-                        // (CharSequence)->Builder is the obfuscated
-                        // setNegativeButtonText(String). The credential invariant
-                        // "Negative text must not be set if device credential
-                        // authentication is allowed" makes build() throw when the
-                        // caller (OFSS BiometricFragment.f()) sets one. Blank it.
-                        try {
-                            XposedBridge.hookMethod(m, BLANK_NEGATIVE_TEXT);
-                            hooksInstalled++;
-                            DiagnosticLogger.log("INSTALL_OK class=" + bc.getName()
-                                    + " method=" + m.getName()
-                                    + " (sig setNegativeButtonText) -> blank");
                         } catch (Throwable t) {
                             hooksFailed++;
                             DiagnosticLogger.hookFailed(bc.getName(), m.getName(),
