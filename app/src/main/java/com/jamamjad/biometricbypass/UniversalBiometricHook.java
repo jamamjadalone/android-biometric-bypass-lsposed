@@ -1009,15 +1009,25 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
      * can identify the real failing path without changing behavior.
      */
     private void hookObserversOnly(ClassLoader classLoader) {
-        // KeyguardManager.isKeyguardSecure - commonly consulted for device-credential
-        // / fallback availability decisions.
+        // KeyguardManager.isKeyguardSecure / isDeviceSecure - consulted for
+        // device-credential (PIN) fallback availability. Force TRUE when the
+        // device has a PIN set but zero prints, so OFSS Digix allows the PIN/
+        // backup authentication path (their fingerprintplugin uses
+        // KeyguardManager.confirmDeviceCredential, not BiometricPrompt).
         try {
             Class<?> kgClass = XposedHelpers.findClassIfExists("android.app.KeyguardManager", classLoader);
             if (kgClass != null) {
-                hookObserveSafely(kgClass, "isKeyguardSecure");
+                hookAllSafely(kgClass, "isKeyguardSecure", RETURN_TRUE);
+                hookAllSafely(kgClass, "isDeviceSecure", RETURN_TRUE);
+                // Observe the never-seen-before backup intent: on OFSS Digix the
+                // "USE BACKUP" button calls createConfirmDeviceCredentialIntent().
+                // Observation-only: never fires the intent, just logs it so we can
+                // confirm Meezan actually reaches the PIN path.
+                hookObserveSafely(kgClass, "createConfirmDeviceCredentialIntent",
+                        CharSequence.class, CharSequence.class);
             }
         } catch (Throwable t) {
-            logError("KeyguardManager observer failure", t);
+            logError("KeyguardManager secure hook failure", t);
         }
 
         // BiometricManager.getEnrolledBiometrics(int, String) (API 30+) - returns
