@@ -473,6 +473,22 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                     DiagnosticLogger.callSpoofed(
                             param.method.getDeclaringClass().getName(), name, param.args,
                             "AUTHENTICATORS|0x8000");
+                } else if (name.equals("setNegativeButtonText")
+                        || name.equals("setNegativeButton")
+                        || name.equals("setNegativeButtonTextRes")) {
+                    // AndroidX invariant: when DEVICE_CREDENTIAL is allowed the
+                    // negative button text MUST be null/negative (the system
+                    // credential screen supplies its own cancel). OFSS Digix's
+                    // obfuscated Builder.a() (setNegativeButtonText) sets one,
+                    // so build() throws
+                    // "IllegalArgumentException: Negative text must not be set...".
+                    // Blank it whenever we may have forced credential in.
+                    if (param.args != null && param.args.length > 0) {
+                        param.args[0] = null;
+                        DiagnosticLogger.callSpoofed(
+                                param.method.getDeclaringClass().getName(), name, param.args,
+                                "null (credential allowed forbids negative text)");
+                    }
                 }
             } catch (Throwable t) {
                 // no-op: never let a logging failure break the app
