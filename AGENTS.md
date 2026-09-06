@@ -35,6 +35,12 @@ necessary, and if you do, make the smallest possible change (see important.txt).
   no PIN fallback. `REWRITE_ANDROIDX_PROMPTINFO` no longer depends on finding a
   ()->int getter; it ORs 0x8000 into the single int mask field deterministically
   (first int field whose value is a small non-negative authenticator mask).
+  **ON-DEVICE RESULT**: U Paisa (`pk.upaisa.com`) verified WORKING — its
+  `PromptInfo$Builder.build()` is rewritten to `AUTHENTICATORS->0x8000` and the
+  framework `BiometricPrompt$Builder.setAllowedAuthenticators` sees `0x8000`.
+  Meezan (`invo8.meezan.mb`) still no PIN prompt; RESTRICTED to the PIN-less
+  OFSS keygen path. Skrill (`com.moneybookers.skrillpayments`) hook coverage
+  confirmed but PIN prompt still not triggered.
 
 ## Project context
 
