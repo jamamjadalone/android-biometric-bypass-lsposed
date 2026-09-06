@@ -496,6 +496,38 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
         }
     };
 
+    // v2.1.6: Blank mNegativeButtonText in PromptInfo.Builder BEFORE build().
+    // AndroidX invariant: when DEVICE_CREDENTIAL is allowed, negative button
+    // text MUST be null — else build() throws
+    // "IllegalArgumentException: Negative text must not be set...".
+    // Field write covers BOTH canonical setNegativeButtonText AND
+    // R8-obfuscated equivalents (e.g. Meezan's Builder.a()).
+    private static final XC_MethodHook FORCE_PROMPTINFO_BUILD_SAFE = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            try {
+                Class<?> builderClass = param.thisObject.getClass();
+                Field negField = null;
+                Class<?> walk = builderClass;
+                while (walk != null && negField == null) {
+                    try {
+                        negField = walk.getDeclaredField("mNegativeButtonText");
+                    } catch (NoSuchFieldException e) {
+                        walk = walk.getSuperclass();
+                    }
+                }
+                if (negField != null) {
+                    negField.setAccessible(true);
+                    negField.set(param.thisObject, null);
+                    DiagnosticLogger.log("FORCE_PROMPTINFO_BUILD_SAFE "
+                            + builderClass.getName()
+                            + " mNegativeButtonText -> null");
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+
     // v1.1.7: signature-based builder spoof - ORs DEVICE_CREDENTIAL into the
     // authenticator int of ANY (int)->Builder method on the AndroidX builders,
     // regardless of its obfuscated name (setAllowedAuthenticators may be
@@ -1141,6 +1173,11 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                             FORCE_DEVICE_CREDENTIAL_BUILDER);
                     hookAllSafely(bc, "setAllowedAuthenticators",
                             FORCE_DEVICE_CREDENTIAL_BUILDER);
+                    // v2.1.6: blank mNegativeButtonText BEFORE build() to
+                    // satisfy AndroidX invariant (credential allowed => null).
+                    // Covers both canonical setNegativeButtonText and
+                    // R8-obfuscated equivalents (e.g. Meezan's Builder.a()).
+                    hookAllSafely(bc, "build", FORCE_PROMPTINFO_BUILD_SAFE);
                 }
             }
 
