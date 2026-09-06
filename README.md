@@ -1,4 +1,4 @@
-# Universal Biometric Redirection Core
+# Biometric Bypass for LSPosed (PIN-Fallback)
 
 <div align="center">
 
@@ -7,110 +7,215 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge&logo=apache)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026--36)-3DDC84.svg?style=for-the-badge&logo=android)](https://developer.android.com)
 [![Framework](https://img.shields.io/badge/Framework-LSPosed%20%2F%20API%2093%2B-8B5CF6.svg?style=for-the-badge&logo=android)](https://github.com/LSPosed/LSPosed)
-[![YouTube](https://img.shields.io/badge/YouTube-@jamamjadalone-FF0000.svg?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@jamamjadalone)
 
 <p align="center">
-  <b>High-performance, non-blocking biometric framework interceptor for custom ROMs, GSI builds, and AOSP devices.</b>
+  <b>App-process-only LSPosed module that turns your device PIN into a biometric fallback.</b><br/>
+  <i>For devices with non-functional or zero-enrolled biometric hardware.</i>
 </p>
 
 </div>
 
 ---
 
-## 📖 Overview
+## ⚠️ Disclaimer — Read Before Using
 
-**Universal Biometric Redirection Core** is a hardened system-level [LSPosed](https://github.com/LSPosed/LSPosed) module engineered to resolve credential discovery bottlenecks on custom Android distributions (LineageOS, Pixel Experience, crDroid, GSI). When devices feature uncalibrated, unconfigured, or faulty biometric hardware, target client apps often refuse to open or present authentication fallback workflows.
+> [!WARNING]
+> **This is a dual-use tool. Use it only on devices and accounts that you own.**
+>
+> - This module lets an app authenticate with a **PIN / device credential** when
+>   it formally requires a **biometric** (fingerprint / face).
+> - **Not every app will work.** Banks and financial apps frequently use
+>   obfuscated, device-attestation-gated, or server-validated biometric paths
+>   that an app-process hook simply cannot satisfy. **Expect partial
+>   compatibility.**
+> - If an app rejects the fallback, **the app is doing what it was designed to
+>   do** — this is not a bug in the module. Do not use it to defeat the
+>   authentication security of an app you do not own.
+> - Use at **your own risk**. The author assumes no responsibility for app
+>   lockouts, account bans, or device issues that may result from use.
+> - Removing the module restores default behavior immediately (no system
+>   files are ever modified).
 
-This module intercepts framework and Jetpack compatibility queries at runtime, short-circuiting hardware HAL dependency checks and reporting healthy, enrolled sensor availability to client applications.
+---
+
+## 📖 What This Is
+
+**Biometric Bypass for LSPosed** is an [LSPosed](https://github.com/LSPosed/LSPosed)
+framework module that intercepts the biometric APIs inside a target app's
+process and rewrites its requests so that Android's **device credential**
+(PIN / pattern / password) is accepted where a fingerprint would normally be
+required.
+
+It targets a specific, common situation:
+
+> A device has **no enrolled fingerprints** (`hasEnrollments == false`), but the
+> user has a **PIN** set. Apps that gate access behind "biometric only" see
+> "no biometric enrolled" and refuse to show the fallback that stock Android
+> provides (e.g., Google Pay's "use PIN on failure" flow).
+
+The module recreates that stock PIN-fallback UX at the app-process level.
+
+- ✅ **No system modifications** — no `/system`, `/vendor`, or `/boot` changes.
+- ✅ **`system_server` is never touched** — the module explicitly skips the
+  `android` package, so ADB and system services stay functional.
+- ✅ **Inert by default** — nothing is hooked until you explicitly enable an
+  app from the in-app UI.
+- ✅ **No bootloop possible** — a failed hook is a no-op, never a crash.
+
+---
+
+## 🧱 How It Works
+
+Inside the **selected app's own process** (never system_server), the module:
+
+1. **Rewrites `BiometricPrompt` / AndroidX `PromptInfo`** so the allowed
+   authenticators include `DEVICE_CREDENTIAL` (`0x8000`). The system
+   `BiometricService` then shows the PIN screen (the same behavior stock
+   Android uses when biometrics fail).
+2. **Spoofs availability gates** (`BiometricManager.canAuthenticate()`,
+   `FingerprintManager.isHardwareDetected()`, enrolled-fingerprint lists) to a
+   "healthy" state, so apps that refuse to *open* a fallback flow when nothing
+   is enrolled will proceed.
+3. **Makes the PIN result a real credential** — when the user correctly enters
+   the PIN, Android mints a genuine credential token, and the app's own
+   `onAuthenticationSucceeded` fires. No fake crypto is injected.
+
+> Because this happens per-app and at the API boundary, compatibility depends
+> entirely on what that specific app uses internally.
 
 ---
 
 ## ⚡ Key Features
 
-- 🛡️ **Zero Native HAL Crashes**: Employs short-circuiting `beforeHookedMethod` execution, eliminating `NullPointerException` and `DeadObjectException` caused by broken hardware binders.
-- 🚀 **Zero-GC Object Reusability**: Utilizes static singleton hook callbacks (`RETURN_TRUE`, `RETURN_BIOMETRIC_SUCCESS`) to prevent heap allocation overhead and eliminate runtime GC churn.
-- 📦 **Modern AndroidX Biometrics Layer**: Complete coverage for both legacy framework APIs (`FingerprintManager`, `BiometricManager`) and modern Jetpack libraries (`androidx.biometric.BiometricManager`, `FingerprintManagerCompat`).
-- 📱 **Target SDK 36 Compliant**: Fully compatible with Android 8.0 (Oreo / API 26) through Android 16 QPR2 (Baklava / API 36).
-- 🎨 **Material 3 Interface**: Minimal, battery-friendly status dashboard built according to Material You design principles.
+- 🛡️ **App-process only** — the system is never hooked or modified.
+- 🔒 **Inert-by-default per-app config** — a JSON file lists exactly which apps
+  get hooks and which features (`biometric`, `devOptions`, `usbDebug`).
+- 🔄 **PIN fallback** — `BiometricPrompt` requests are rewritten to allow
+  `DEVICE_CREDENTIAL`; system `BiometricService` shows the real PIN screen.
+- 📦 **Broad API coverage**:
+  - Framework: `BiometricManager`, `FingerprintManager`, `IBiometricService`
+  - Jetpack/AndroidX: `androidx.biometric.BiometricManager`, `BiometricPrompt`,
+    `FingerprintManagerCompat`
+  - Obfuscated AndroidX (R8-renamed) — hooked **by method signature**, so
+    renamed `a()`/`b()` methods are caught as well.
+  - OFSS Digix (Meezan Bank family) `ResourceMapper` + keystore enable-flow fix.
+- 📱 **API 26 – 36** (Android 8.0 through Android 16).
+- 🧹 **Diagnostic logging** behind tag `BioDiag` for troubleshooting.
 
 ---
 
-## 🏗️ Architecture & Execution Flow
+## 📁 Compatibility
 
-```mermaid
-flowchart TD
-    App["Target Android Application\n(Banking / Enterprise / Authenticator)"] -->|Queries Biometric State| Framework["Android Framework & Jetpack API\n• BiometricManager.canAuthenticate()\n• FingerprintManager.isHardwareDetected()\n• androidx.biometric.BiometricManager"]
-    Framework -->|Intercepted by LSPosed| Hook["UniversalBiometricHook (LSPosed Core)\nbeforeHookedMethod Short-Circuiting Engine"]
-    Hook -- Halts call before reaching broken Vendor HAL / TEE --> Spoof["Injects BiometricManager.BIOMETRIC_SUCCESS (0)\nInjects hasEnrolledFingerprints = true"]
-    Spoof -->|Returns Guaranteed State| App
-    App -->|Enables Fallback Credential Flow| Success["User Authenticates via PIN / Password"]
-```
+> [!NOTE]
+> **This module is best-effort, not guaranteed.** Results vary by app.
+
+| Category | Typical result |
+| :- | :- |
+| Apps using **stock `BiometricPrompt`** or **unobfuscated AndroidX prompt** | **Likely works** — PIN fallback is inserted cleanly. |
+| Apps using **obfuscated AndroidX** or **custom auth SDKs** (banks, fintech) | **May partially work** — gates are spoofed, but prompt behavior depends on the app's internal flow. |
+| Apps with **server-side / attestation-based** biometric checks | **Unlikely to work** — the check isn't local, so no in-app hook can satisfy it. |
+
+**Known real-world results (community testing):**
+- ✅ Works on some apps using the framework `BiometricPrompt`.
+- ⚠️ Meezan Bank, Skrill, and several other fintech apps may not display the
+  PIN prompt even with the module enabled — the enable/verify flow differs per
+  app and may use unattestable or obfuscated paths.
+- ❓ App behavior can change with every app update.
+
+**Always test on a per-app basis.** If it doesn't work for an app, that is
+expected behaviour, not a module defect.
 
 ---
 
 ## ⚙️ Installation & Setup
 
 ### Prerequisites
-- Device running Android 8.0 - 16 with Root access (Magisk, KernelSU, or APatch).
-- [Zygisk](https://github.com/topjohnwu/Magisk) enabled in your root manager.
-- [LSPosed Framework](https://github.com/LSPosed/LSPosed) (Zygisk release v1.9.2+ recommended).
 
-### Step-by-Step Configuration
-1. **Download & Install**: Grab the latest `UniversalBiometricBypass-vX.X.X.apk` from the [Releases](https://github.com/jamamjadalone/android-biometric-bypass-lsposed/releases) page.
-2. **Open LSPosed Manager**: A notification will prompt that a new module is detected.
-3. **Enable Module**: Navigate to **Modules** ➔ Select **Biometric Redirection Core** ➔ Toggle **Enable**.
-4. **Scope Selection**:
-   - Ensure **System Framework (`android`)** is ticked (default).
-   - *(Optional)* Check any specific financial, banking, or enterprise apps requiring explicit availability overrides.
-5. **Reboot**: Soft reboot your device or restart the Android system server.
+- Android 8.0 – 16 device with **root** (Magisk, KernelSU, or APatch) and
+  [Zygisk](https://github.com/topjohnwu/Magisk) enabled.
+- [LSPosed](https://github.com/LSPosed/LSPosed) (Zygisk build) installed.
 
----
+### Steps
 
-## 📦 Building from Source
+1. **Install the module APK** from the
+   [Releases](https://github.com/jamamjadalone/android-biometric-bypass-lsposed/releases)
+   page.
+2. **Enable the module** in your LSPosed Manager:
+   - Modules → **Biometric Bypass** → toggle **Enable**.
+3. **Set an app scope** for the module so it can load into the target app's
+   process. The module loads universally, but stays **inert** until you enable
+   it per-app:
+   - In LSPosed, set the module scope to the apps you want to try, **or** to
+     all apps (`*`) if you prefer to decide from the in-app UI; the module
+     never touches `system_server` either way.
+4. **Enable the app in the module's in-app UI**:
+   - Open the **Biometric Bypass** app.
+   - Pick an app and turn on **Biometric** (`biometric: true`).
+   - The config is written to `/data/local/tmp/biobypass_config.json`.
+5. **Force-stop the target app** (so its next launch loads the hooks), then
+   open it and try the biometric flow.
 
-This project compiles with standard Gradle and JDK 17:
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/jamamjadalone/android-biometric-bypass-lsposed.git
-cd android-biometric-bypass-lsposed
-
-# 2. Grant wrapper execution rights (Linux/macOS)
-chmod +x gradlew
-
-# 3. Build Debug APK
-./gradlew assembleDebug --stacktrace --info
-```
-
-The output APK will be generated at:
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+> Scope and config can be managed either from the LSPosed manager or via the
+> module CLI (`su -c '/data/adb/lspd/cli ...'`). Config schema:
+> `{"version":2, "apps": {"com.example.app": {"biometric": true, "devOptions": false, "usbDebug": false}}}`
 
 ---
 
-## 🔒 Security & Privacy Notice
+## 🔍 Troubleshooting
+
+- **PIN prompt still doesn't appear?** Check the app actually uses a local
+  `BiometricPrompt` path (see Compatibility above). Some apps gate behind
+  attestation that no app-process hook can satisfy.
+- **Grab diagnostics:** enable debug logging in the module, then
+  `adb logcat -s BioDiag:*` while you reproduce the flow in the target app.
+  `INSTALL_OK` lines show which hooks actually installed for that app.
+- **Nothing happens at all?** Verify (1) the module is enabled in LSPosed,
+  (2) the app is in the LSPosed scope, (3) `bio=true` is present for that
+  package in the config file, and (4) the app was force-stopped after the
+  config change.
+
+---
+
+## 🏗️ Building from Source
 
 > [!IMPORTANT]
-> **Privacy Notice**: This module performs local, non-persistent method return adjustments inside your device's memory. It **does NOT** store, record, capture, or transmit user credentials, biometric templates, passwords, PINs, or device identifiers. All operations strictly execute on-device within isolated process sandboxes.
+> This repository uses **GitHub Actions** as its official build pipeline.
+> A new release is produced automatically when a version tag (matching
+> `versionName` in `app/build.gradle`) is pushed. Local Gradle builds are
+> discouraged for release distribution.
 
-For reporting security vulnerabilities, please refer to our [Security Policy](SECURITY.md).
+To build locally for development (JDK 17 required):
+
+```bash
+git clone https://github.com/jamamjadalone/android-biometric-bypass-lsposed.git
+cd android-biometric-bypass-lsposed
+./gradlew assembleDebug
+```
+
+Output APK: `app/build/outputs/apk/debug/app-debug.apk`
 
 ---
 
-## 💬 Community & Contact
+## 🔒 Privacy & Security
 
-For questions, tutorials, and project updates, connect with us on YouTube:
-- 📺 **Channel**: [@jamamjadalone](https://www.youtube.com/@jamamjadalone)
+- All hooks run **inside the target app's own process** — nothing is persisted
+  except the small local config file at `/data/local/tmp/biobypass_config.json`.
+- **No credential is ever captured.** The PIN prompt is the genuine system
+  dialog; the app receives a normal, authentic authentication result.
+- No telemetry, no network access, no data transmission.
+
+Please report vulnerabilities through GitHub's private vulnerability reporting
+feature; see [SECURITY.md](SECURITY.md).
 
 ---
 
-## 🤝 Contributing
+## 💬 Community & Support
 
-Contributions, issues, and feature requests are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting pull requests.
+- 📺 YouTube: [@jamamjadalone](https://www.youtube.com/@jamamjadalone)
+- 🙏 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## 📄 License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+Apache License 2.0 — see [LICENSE](LICENSE).

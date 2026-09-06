@@ -1,6 +1,6 @@
-# Contributing to Universal Biometric Redirection Core
+# Contributing to Biometric Bypass for LSPosed
 
-First off, thank you for considering contributing to **Universal Biometric Redirection Core**! Community contributions help keep this module fast, stable, and compatible across hundreds of Android device models and custom ROM variants.
+First off, thank you for considering contributing! Contributions help keep this module fast, stable, and compatible across a wide range of Android devices and app SDK configurations.
 
 ---
 
@@ -52,3 +52,9 @@ By participating in this project, you agree to maintain a respectful, welcoming,
 - **Java 17 / SDK 36**: Ensure code conforms to modern Android Java standards.
 - **No Heavy Allocations in Hook Paths**: Do not instantiate new objects or run heavy loops inside high-frequency method hooks.
 - **Preserve Stability**: Always catch exceptions defensively (`XposedHelpers.findClassIfExists`, guarded calls) so a failed hook will never trigger a System UI crash or bootloop.
+- **Per-app config model**: Hooks must be gated behind `Config.forPackage(...)`.
+  Do not add hooks that fire for every app unconditionally — the module is
+  **inert by default** and only acts for apps explicitly enabled in the config
+  file.
+- **`system_server` safety**: never hook the `android` package. Applications
+  only.
