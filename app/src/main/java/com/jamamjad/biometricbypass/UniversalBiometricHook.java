@@ -1249,17 +1249,29 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                 continue;
             }
             Class<?>[] pt = m.getParameterTypes();
-            if (pt.length == 1 && pt[0] == Context.class) {
-                try {
-                    XposedBridge.hookMethod(m, RETURN_TRUE);
-                    hooksInstalled++;
-                    DiagnosticLogger.log("INSTALL_OK class=" + rm.getName()
-                            + " method=" + m.getName()
-                            + " (OFSS ResourceMapper bool) -> true");
-                } catch (Throwable t) {
-                    hooksFailed++;
-                    DiagnosticLogger.hookFailed(rm.getName(), m.getName(), t.getMessage());
-                }
+            if (pt.length != 1 || pt[0] != Context.class) {
+                continue;
+            }
+            // SAFE (v2.1.1): ONLY force the ALLOW_FACE_BIOMETRIC accessor.
+            // On this build the R8 accessors are k/l/m/n/o/p; on-device
+            // diagnostics proved o/p are invoked by the Dynatrace init during
+            // SplashActivity and gate the background_splash drawable loading.
+            // Forcing them to true crashes MainActivity with
+            // Resources$NotFoundException. Only "l" gates the enable-
+            // fingerprint keystore branch and must stay true. Other accessors
+            // are left untouched (safe default).
+            if (!"l".equals(m.getName())) {
+                continue;
+            }
+            try {
+                XposedBridge.hookMethod(m, RETURN_TRUE);
+                hooksInstalled++;
+                DiagnosticLogger.log("INSTALL_OK class=" + rm.getName()
+                        + " method=" + m.getName()
+                        + " (OFSS ResourceMapper ALLOW_FACE_BIOMETRIC) -> true");
+            } catch (Throwable t) {
+                hooksFailed++;
+                DiagnosticLogger.hookFailed(rm.getName(), m.getName(), t.getMessage());
             }
         }
     }
