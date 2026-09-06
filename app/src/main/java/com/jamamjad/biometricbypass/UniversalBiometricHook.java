@@ -146,8 +146,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *   LSPosed scope is likewise written by the UI (su + lspd cli scope set) to
  *   ONLY the selected packages (+ optional "system"); universal * is removed.
  *
- * No system files are modified. This is 100% LSPosed-level.
+* No system files are modified. This is 100% LSPosed-level.
  * ============================================================================
+ *
+ * v2.3.0 - OBFUSCATION-PROOF ANDROIDX PROMPTINFO REWRITE (Meezan/OFSS class).
+ *   Root cause on device: R8-obfuscated androidx.biometric.PromptInfo inside
+ *   Meezan never gained DEVICE_CREDENTIAL (0x8000) in its authenticator mask,
+ *   so the system BiometricService had nothing to offer except ERROR_BIOMETRIC
+ *   (no enrolled prints on this device), and no PIN fallback was shown.
+ *   FIX: REWRITE_ANDROIDX_PROMPTINFO no longer depends on finding a ()->int
+ *   getter (which can be renamed or absent). PromptInfo carries a SINGLE int
+ *   field (mAllowedAuthenticators); we now OR 0x8000 into the first int field
+ *   whose value is a small non-negative authenticator mask. This covers both
+ *   canonical and R8-renamed builds of androidx.biometric deterministically.
  *
  * Verified during Step 6 on-device diagnostics:
  *   - Module loads into com.avanza.ambitwizfbl (bank app) - confirmed by
@@ -160,7 +171,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
  *       * hidden BiometricManager.hasEnrolledBiometrics()
  *       * hidden FingerprintManager.getEnrolledFingerprints(int)
  *     each guarded so an absent method on a given OEM build is a no-op.
- * Diagnostic logging retained (tag "BioDiag"); disable at runtime with:
+ *  Diagnostic logging retained (tag "BioDiag"); disable at runtime with:
  *   adb shell setprop persist.biometric.diag 0
  * ============================================================================
  */
@@ -577,7 +588,10 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
     // v1.1.7: rewrites a freshly built androidx.biometric.BiometricPrompt
     // PromptInfo so its authenticator mask carries DEVICE_CREDENTIAL, even
     // when the app bundles an R8-obfuscated AndroidX (field + getter names
-    // renamed). Only the (single) int field holding the mask is updated.
+    // renamed). v2.3.0: no longer depends on a ()->int getter existing; the
+    // PromptInfo has a SINGLE int field (mAllowedAuthenticators) and we OR the
+    // credential bit into the first int field whose value is a valid
+    // authenticator mask (small positive, no credential bit yet).
     private static final XC_MethodHook REWRITE_ANDROIDX_PROMPTINFO = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
@@ -588,41 +602,33 @@ public class UniversalBiometricHook implements IXposedHookLoadPackage {
                     return;
                 }
                 Class<?> c = built.getClass();
-                Method getter = null;
-                for (Method m : c.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && m.getReturnType() == int.class) {
-                        getter = m;
-                        break;
-                    }
-                }
-                if (getter == null) {
-                    return;
-                }
-                getter.setAccessible(true);
-                Object r = getter.invoke(built);
-                if (!(r instanceof Integer)) {
-                    return;
-                }
-                int current = (Integer) r;
-                if ((current & AUTHENTICATOR_DEVICE_CREDENTIAL) != 0) {
-                    return;
-                }
+                int current = -1;
                 Field maskField = null;
                 Class<?> walk = c;
                 outer:
                 while (walk != null) {
                     for (Field f : walk.getDeclaredFields()) {
-                        if (f.getType() == int.class) {
-                            f.setAccessible(true);
-                            if (((Integer) f.get(built)).intValue() == current) {
-                                maskField = f;
-                                break outer;
-                            }
+                        if (f.getType() != int.class) {
+                            continue;
                         }
+                        f.setAccessible(true);
+                        int v = f.getInt(built);
+                        // A valid authenticator mask is a small non-negative
+                        // value (e.g. 0xF / 15, 0xFF / 255, 0x8000). Skip the
+                        // obvious non-mask ints (0, negatives, huge values).
+                        if (v < 0 || v > 0xFFFF) {
+                            continue;
+                        }
+                        if ((v & AUTHENTICATOR_DEVICE_CREDENTIAL) != 0) {
+                            return; // already credential-allowed
+                        }
+                        current = v;
+                        maskField = f;
+                        break outer;
                     }
                     walk = walk.getSuperclass();
                 }
-                if (maskField == null) {
+                if (maskField == null || current < 0) {
                     return;
                 }
                 maskField.setInt(built, current | AUTHENTICATOR_DEVICE_CREDENTIAL);

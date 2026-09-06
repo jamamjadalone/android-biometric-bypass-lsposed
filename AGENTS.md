@@ -12,15 +12,29 @@ After ANY source change, do ONLY this:
 
 1. `git add -A`
 2. `git commit -m "..."`        (read versionCode/versionName in app/build.gradle first)
-3. `git tag v2.2.0`            (version MUST match app/build.gradle versionName)
+3. `git tag v2.3.0`            (version MUST match app/build.gradle versionName)
 4. `git push origin main`
-5. `git push origin v2.2.0`    (this triggers the GitHub Actions build + release)
+5. `git push origin v2.3.0`    (this triggers the GitHub Actions build + release)
 6. Monitor the Actions run:
    https://github.com/jamamjadalone/android-biometric-bypass-lsposed/actions
 7. Download the APK from the created release.
+8. **KEEP ONLY THE LATEST RELEASE** (after every fix): delete every OLD GitHub
+   release so only the newest APK remains as the single `Latest` release.
+   Use `gh`:
+   - `gh release list`                      (see all releases)
+   - `gh release delete <old-tag> --yes --cleanup-tag`   (delete each old one)
 
 Do NOT attempt to build/test locally. Do NOT change the workflow unless strictly
 necessary, and if you do, make the smallest possible change (see important.txt).
+
+## Fix log (append after every new fix)
+
+- **v2.3.0 — obfuscation-proof AndroidX PromptInfo rewrite**: R8-renamed
+  androidx.biometric PromptInfo inside Meezan/OFSS never got DEVICE_CREDENTIAL
+  (0x8000) OR-ed into its authenticator mask, so system BiometricService showed
+  no PIN fallback. `REWRITE_ANDROIDX_PROMPTINFO` no longer depends on finding a
+  ()->int getter; it ORs 0x8000 into the single int mask field deterministically
+  (first int field whose value is a small non-negative authenticator mask).
 
 ## Project context
 
