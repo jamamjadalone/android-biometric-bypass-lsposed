@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-<!-- v2.1: EMPTY default scope. So apps are NOT pre-checked / auto-added to the
-     LSPosed scope. The module only loads into apps the user manually selects
-     in the in-app UI (MainActivity writes the scope via "lspd cli scope set"). -->
+<!-- v2.2: UNIVERSAL scope (*). Module loads into EVERY app process
+     automatically. However the module is INERT by default —
+     Config.forPackage() returns AppConfig.NONE (all flags FALSE) for
+     apps not in /data/local/tmp/biobypass_config.json. The user must
+     manually enable each app via the in-app UI (MainActivity) before
+     any hooks fire. system_server is SKIPPED in code.
+     This gives full app coverage with zero pre-enabled auto-start. -->
 <string-array name="xposed_scope">
-    </string-array>
+    <item>*</item>
+</string-array>
 </resources>
