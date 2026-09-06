@@ -1,28 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-<!-- v2.0: SUGGESTED scope for the in-app picker defaults. No longer the real
-     scope - the UI (MainActivity) writes the actual LSPosed scope via
-     "lspd cli scope set" to ONLY the apps the user enables. This list is
-     pre-checked (Biometric/Dev/USB) whenever an app is first loaded. It is
-     seeded from the user's HMA_Config protection targets (banks/telcos). -->
+<!-- v2.1: EMPTY default scope. So apps are NOT pre-checked / auto-added to the
+     LSPosed scope. The module only loads into apps the user manually selects
+     in the in-app UI (MainActivity writes the scope via "lspd cli scope set"). -->
 <string-array name="xposed_scope">
-        <item>com.miniclip.eightballpool</item>
-        <item>com.google.android.gms</item>
-        <item>com.android.vending</item>
-        <item>pk.com.telenor.phoenix</item>
-        <item>com.avanza.ambitwizfbl</item>
-        <item>com.jazz.androidsync</item>
-        <item>com.techlogix.mobilinkcustomer</item>
-        <item>invo8.meezan.mb</item>
-        <item>com.telenor.pakistan.mytelenor</item>
-        <item>com.ofss.digx.mobile.android.allied</item>
-        <item>com.zong.customercare</item>
-        <item>com.nayapay.app</item>
-        <item>com.nsave.app</item>
-        <item>com.sadapay.app</item>
-        <item>com.moneybookers.skrillpayments</item>
-        <item>pk.upaisa.com</item>
-        <item>app.com.brd</item>
-        <item>com.pixelbin.upscale.media</item>
     </string-array>
 </resources>
